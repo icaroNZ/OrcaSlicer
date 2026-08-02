@@ -630,6 +630,14 @@ public:
     // Validate the PrintConfig. Returns an empty string on success, otherwise an error message is returned.
     std::map<std::string, std::string>         validate(bool under_cli = false);
 
+    // Clamp numeric options whose value falls outside the <min, max> range declared in print_config_def
+    // back into that range, in place. Projects authored by other slicers (Bambu Studio / MakerWorld 3mf,
+    // in particular) legitimately store sentinel values that this build rejects, which used to leave the
+    // user with an error notification and a config that still had to be fixed by hand.
+    // Returns one entry per repaired option, mapping the option key to a "<old> -> <new>" description.
+    // Nil entries of nullable vector options and non-numeric options are left untouched.
+    std::map<std::string, std::string>         repair_out_of_range_values();
+
     // Verify whether the opt_key has not been obsoleted or renamed.
     // Both opt_key and value may be modified by handle_legacy().
     // If the opt_key is no more valid in this version of Slic3r, opt_key is cleared by handle_legacy().

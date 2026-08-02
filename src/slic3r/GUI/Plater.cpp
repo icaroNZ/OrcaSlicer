@@ -11999,6 +11999,30 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         config.apply(static_cast<const ConfigBase &>(FullPrintConfig::defaults()));
                         // and place the loaded config over the base.
                         config += std::move(config_loaded);
+
+                        // Projects authored by other slicers (MakerWorld / Bambu Studio 3mf in particular) store
+                        // numeric values this build considers out of range. Clamp them back into the supported
+                        // range instead of handing the user a list of settings to go and fix by hand.
+                        std::map<std::string, std::string> repaired = config.repair_out_of_range_values();
+                        if (!repaired.empty()) {
+                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("Param values in 3mf adjusted: ");
+                            for (std::map<std::string, std::string>::iterator it=repaired.begin(); it!=repaired.end(); ++it)
+                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("%1%: %2%")%it->first %it->second;
+
+                            NotificationManager *notify_manager = q->get_notification_manager();
+                            std::string info_message = L("Some values in the 3mf were outside the supported range and have been adjusted:");
+                            info_message += "\n";
+                            for (std::map<std::string, std::string>::iterator it=repaired.begin(); it!=repaired.end(); ++it)
+                                info_message += "-" + it->first + ": " + it->second + "\n";
+                            info_message += "\n";
+                            info_message += L("Review them in the param tabs if the result is not what you expected.");
+                            notify_manager->push_notification(NotificationType::CustomNotification,
+                                                              NotificationManager::NotificationLevel::ImportantNotificationLevel,
+                                                              info_message);
+                        }
+
+                        // Anything left over is a problem that cannot be fixed by clamping, e.g. a line width
+                        // wider than the nozzle allows or a setting combination that contradicts spiral vase mode.
                         std::map<std::string, std::string> validity = config.validate();
                         if (!validity.empty()) {
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("Param values in 3mf error: ");

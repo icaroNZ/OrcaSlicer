@@ -6,6 +6,8 @@
 #include "I18N.hpp"
 
 #include "GCode/Thumbnails.hpp"
+#include <algorithm>
+#include <climits>
 #include <set>
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/format.hpp>
@@ -7742,6 +7744,16 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
                 opt_key == "ironing_pattern"               ||
                 opt_key == "support_ironing_pattern") && value == "zig-zag") {
         value = "rectilinear";
+    } else if ((opt_key == "wall_filament"          ||
+                opt_key == "sparse_infill_filament" ||
+                opt_key == "solid_infill_filament") && value == "0") {
+        //BBS: Bambu Studio / MakerWorld projects use "0" as "inherit the object's extruder".
+        //These keys are 1 based here and have no such sentinel, so fall back to the first filament.
+        //Note that support_filament and support_interface_filament do accept 0 and are left alone.
+        value = "1";
+    } else if (opt_key == "tree_support_wall_count" && !value.empty() && value.front() == '-') {
+        //BBS: newer Bambu Studio writes -1 for "auto", which is spelled "0" here.
+        value = "0";
     }
 
     // Ignore the following obsolete configuration keys:
@@ -8129,6 +8141,101 @@ std::map<std::string, std::string> DynamicPrintConfig::validate(bool under_cli)
         //FIXME no validation on SLA data?
         return std::map<std::string, std::string>();
     }
+}
+
+// Mirrors the "out of range validation of numeric values" loop in Slic3r::validate(), but instead of
+// only reporting the offending options it clamps them back into the declared <min, max> range.
+// Keeping the detection in sync with validate() matters: an option repaired here must be an option
+// validate() would otherwise have rejected, and nothing else is ever touched.
+std::map<std::string, std::string> DynamicPrintConfig::repair_out_of_range_values()
+{
+    std::map<std::string, std::string> repaired;
+
+    for (const std::string &opt_key : this->keys()) {
+        ConfigOption *opt = this->optptr(opt_key);
+        if (opt == nullptr)
+            continue;
+        const ConfigOptionDef *optdef = print_config_def.get(opt_key);
+        if (optdef == nullptr)
+            continue;
+
+        // Nothing to clamp against.
+        if (optdef->min == INT_MIN && optdef->max == INT_MAX)
+            continue;
+
+        const double min = double(optdef->min);
+        const double max = double(optdef->max);
+
+        // Serialized on the first repair only, so that the report can show what the 3mf actually asked for.
+        std::string old_value;
+        bool        changed            = false;
+        auto        remember_old_value = [&old_value, &changed, opt]() {
+            if (! changed) {
+                old_value = opt->serialize();
+                changed   = true;
+            }
+        };
+
+        switch (opt->type()) {
+        case coFloat:
+        case coPercent:
+        case coFloatOrPercent:
+        {
+            // ConfigOptionPercent and ConfigOptionFloatOrPercent both derive from ConfigOptionFloat,
+            // and only the numeric part is bounded - the percent flag is left alone.
+            auto *fopt = static_cast<ConfigOptionFloat*>(opt);
+            if (fopt->value < min || fopt->value > max) {
+                remember_old_value();
+                fopt->value = std::clamp(fopt->value, min, max);
+            }
+            break;
+        }
+        case coFloats:
+        case coPercents:
+        {
+            auto *vopt = static_cast<ConfigOptionVector<double>*>(opt);
+            for (size_t i = 0; i < vopt->values.size(); ++ i) {
+                // Skip the NaN sentinel of nullable options, it is not a real value.
+                if (vopt->is_nil(i))
+                    continue;
+                if (vopt->values[i] < min || vopt->values[i] > max) {
+                    remember_old_value();
+                    vopt->values[i] = std::clamp(vopt->values[i], min, max);
+                }
+            }
+            break;
+        }
+        case coInt:
+        {
+            auto *iopt = static_cast<ConfigOptionInt*>(opt);
+            if (iopt->value < min || iopt->value > max) {
+                remember_old_value();
+                iopt->value = std::clamp(iopt->value, optdef->min, optdef->max);
+            }
+            break;
+        }
+        case coInts:
+        {
+            auto *vopt = static_cast<ConfigOptionVector<int>*>(opt);
+            for (size_t i = 0; i < vopt->values.size(); ++ i) {
+                // Skip the INT_MAX sentinel of nullable options, it is not a real value.
+                if (vopt->is_nil(i))
+                    continue;
+                if (vopt->values[i] < min || vopt->values[i] > max) {
+                    remember_old_value();
+                    vopt->values[i] = std::clamp(vopt->values[i], optdef->min, optdef->max);
+                }
+            }
+            break;
+        }
+        default:;
+        }
+
+        if (changed)
+            repaired.emplace(opt_key, old_value + " -> " + opt->serialize());
+    }
+
+    return repaired;
 }
 
 std::string DynamicPrintConfig::get_filament_type(std::string &displayed_filament_type, int id)

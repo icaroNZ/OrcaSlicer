@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectSchemaVersion.hpp"
@@ -285,4 +286,105 @@ TEST_CASE("DynamicPrintConfig keeps ordinary filament types unchanged", "[Config
     std::string display_type;
     CHECK(config.get_filament_type(display_type, 0) == "PLA");
     CHECK(display_type == "PLA");
+}
+
+SCENARIO("Out of range values coming from a foreign 3mf are repaired on import.", "[Config]") {
+    GIVEN("A config generated from default options") {
+        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+        // Precondition: the defaults themselves must be clean, otherwise the assertions below are meaningless.
+        REQUIRE(config.validate().empty());
+
+        WHEN("It carries the values a MakerWorld 3mf is known to store") {
+            // These are exactly the keys and values reported by the "Invalid values found in the 3mf" notification.
+            config.set("raft_first_layer_expansion", -1.0);
+            config.set("solid_infill_filament", 0);
+            config.set("sparse_infill_filament", 0);
+            config.set("tree_support_wall_count", -1);
+            config.set("wall_filament", 0);
+
+            std::map<std::string, std::string> repaired = config.repair_out_of_range_values();
+
+            THEN("Every offending key is reported as repaired") {
+                // Snapmaker: raft_first_layer_expansion accepts -1 ("auto", min = -1) on this branch,
+                // so unlike the Nokoff fork it is in range and must be left alone.
+                REQUIRE(repaired.size() == 4);
+                REQUIRE(repaired.count("raft_first_layer_expansion") == 0);
+                REQUIRE(repaired.count("solid_infill_filament") == 1);
+                REQUIRE(repaired.count("sparse_infill_filament") == 1);
+                REQUIRE(repaired.count("tree_support_wall_count") == 1);
+                REQUIRE(repaired.count("wall_filament") == 1);
+            }
+            THEN("Each value is clamped into the supported range") {
+                // Filament indices are 1 based here, so the "inherit" sentinel becomes the first filament.
+                REQUIRE(config.opt_int("solid_infill_filament") == 1);
+                REQUIRE(config.opt_int("sparse_infill_filament") == 1);
+                REQUIRE(config.opt_int("wall_filament") == 1);
+                // 0 support wall loops means auto, which is what -1 means in the source slicer.
+                REQUIRE(config.opt_int("tree_support_wall_count") == 0);
+                REQUIRE_THAT(config.opt_float("raft_first_layer_expansion"), Catch::Matchers::WithinAbs(-1.0, 1e-9));
+            }
+            THEN("The repaired config passes validation, so no error is raised to the user") {
+                REQUIRE(config.validate().empty());
+            }
+            THEN("The report describes the change that was made") {
+                REQUIRE(repaired["wall_filament"] == "0 -> 1");
+                REQUIRE(repaired["tree_support_wall_count"] == "-1 -> 0");
+            }
+        }
+
+        WHEN("Every value is already within range") {
+            THEN("Nothing is touched") {
+                REQUIRE(config.repair_out_of_range_values().empty());
+                REQUIRE(config.validate().empty());
+            }
+        }
+
+        WHEN("A nullable vector option holds both a nil marker and an out of range value") {
+            // filament_z_hop inherits <0, 5> from z_hop and is nullable.
+            auto *opt = config.option<ConfigOptionFloatsNullable>("filament_z_hop", true);
+            opt->values = { ConfigOptionFloatsNullable::nil_value(), 9.0 };
+
+            std::map<std::string, std::string> repaired = config.repair_out_of_range_values();
+
+            THEN("The nil marker survives and only the real value is clamped") {
+                REQUIRE(repaired.count("filament_z_hop") == 1);
+                REQUIRE(opt->is_nil(0));
+                REQUIRE_THAT(opt->values[1], Catch::Matchers::WithinAbs(5.0, 1e-9));
+            }
+        }
+    }
+}
+
+SCENARIO("Foreign sentinel values are translated while a config is deserialized.", "[Config]") {
+    GIVEN("A config generated from default options") {
+        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+
+        WHEN("A filament index arrives as the \"inherit\" sentinel 0") {
+            config.set_deserialize_strict("wall_filament", "0");
+            config.set_deserialize_strict("sparse_infill_filament", "0");
+            config.set_deserialize_strict("solid_infill_filament", "0");
+
+            THEN("It is mapped onto the first filament") {
+                REQUIRE(config.opt_int("wall_filament") == 1);
+                REQUIRE(config.opt_int("sparse_infill_filament") == 1);
+                REQUIRE(config.opt_int("solid_infill_filament") == 1);
+            }
+        }
+
+        WHEN("Support wall loops arrive as the \"auto\" sentinel -1") {
+            config.set_deserialize_strict("tree_support_wall_count", "-1");
+
+            THEN("It is mapped onto 0, which spells auto here") {
+                REQUIRE(config.opt_int("tree_support_wall_count") == 0);
+            }
+        }
+
+        WHEN("support_filament arrives as 0") {
+            config.set_deserialize_strict("support_filament", "0");
+
+            THEN("It is left alone, because 0 is a valid value for that key") {
+                REQUIRE(config.opt_int("support_filament") == 0);
+            }
+        }
+    }
 }
