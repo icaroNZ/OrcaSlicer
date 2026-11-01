@@ -7,6 +7,7 @@
 #include <string>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
+#include <boost/log/trivial.hpp>
 
 #include <wx/sizer.h>
 #include <wx/stattext.h>
@@ -168,6 +169,19 @@ void SMPhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_opt
                         const auto api_key = dlg.GetApiKey();
                         m_config->opt_string("printhost_apikey") = api_key;
                         result       = !api_key.empty();
+                    }
+                }
+            }
+            // Hosts that obtain a credential during the test (the Snapmaker 2.0 touchscreen token) hand it back here,
+            // so it is saved with the printer settings and the touchscreen does not ask for approval again.
+            if (result) {
+                const nlohmann::json auth = host->get_auth_info();
+                if (auth.is_object() && auth.contains("printhost_apikey") && auth["printhost_apikey"].is_string()) {
+                    const std::string api_key = auth["printhost_apikey"].get<std::string>();
+                    if (!api_key.empty() && api_key != m_config->opt_string("printhost_apikey")) {
+                        BOOST_LOG_TRIVIAL(info) << host->get_name() << ": storing the access token returned by the connection test";
+                        m_config->opt_string("printhost_apikey") = api_key;
+                        m_optgroup->set_value("printhost_apikey", wxString::FromUTF8(api_key), false);
                     }
                 }
             }

@@ -121,3 +121,16 @@ target_link_libraries(${_FILAMENT_SORT_TEST_NAME}_tests PRIVATE
     ${wxWidgets_LIBRARIES})
 set_property(TARGET ${_FILAMENT_SORT_TEST_NAME}_tests PROPERTY FOLDER "tests")
 catch_discover_tests(${_FILAMENT_SORT_TEST_NAME}_tests TEST_PREFIX "${_FILAMENT_SORT_TEST_NAME}: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
+
+# Snapmaker 2.0 touchscreen HTTP protocol helpers (print host "snapmaker2"). The helpers are plain C++ plus
+# nlohmann/json, so this suite needs neither wxWidgets nor libcurl.
+set(_SM2_TEST_NAME snapmaker2_protocol)
+add_executable(${_SM2_TEST_NAME}_tests
+    Snapmaker2Protocol_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/slic3r/Utils/Snapmaker2Protocol.cpp)
+target_include_directories(${_SM2_TEST_NAME}_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/deps_src)
+target_link_libraries(${_SM2_TEST_NAME}_tests PRIVATE Catch2::Catch2WithMain)
+set_property(TARGET ${_SM2_TEST_NAME}_tests PROPERTY FOLDER "tests")
+catch_discover_tests(${_SM2_TEST_NAME}_tests TEST_PREFIX "${_SM2_TEST_NAME}: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})

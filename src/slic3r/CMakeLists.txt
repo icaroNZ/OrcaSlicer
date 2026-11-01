@@ -667,6 +667,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/SerialMessageType.hpp
     Utils/SimplyPrint.cpp
     Utils/SimplyPrint.hpp
+    Utils/Snapmaker2.cpp
+    Utils/Snapmaker2.hpp
+    Utils/Snapmaker2Protocol.cpp
+    Utils/Snapmaker2Protocol.hpp
     Utils/TCPConsole.cpp
     Utils/TCPConsole.hpp
     Utils/UndoRedo.cpp
