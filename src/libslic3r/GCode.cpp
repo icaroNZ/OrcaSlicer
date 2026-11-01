@@ -3302,16 +3302,24 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     // This happens before Z goes down to layer 0 again, so that no collision happens hopefully.
                     m_enable_cooling_markers = false; // we're not filtering these moves through CoolingBuffer
                     m_avoid_crossing_perimeters.use_external_mp_once();
+                    // Retract and raise Z to the highest printed Z BEFORE any tool change (Snapmaker/OrcaSlicer#136).
+                    // Previously set_extruder() ran first, so the nozzle switch, the heat-up wait (A250 Dual
+                    // change_filament_gcode: T<n> + M109 ... W1) and any carriage move happened just above the top of
+                    // the finished object. Ported from kbaker827/OrcaSlicer@610069f89.
+                    file.write(this->retract());
+                    file.write(m_writer.travel_to_z(m_max_layer_z));
                     // BBS. change tool before moving to origin point.
                     if (m_writer.need_toolchange(initial_extruder_id)) {
                         const PrintObjectConfig& object_config              = object.config();
                         coordf_t                 initial_layer_print_height = print.config().initial_layer_print_height.value;
+                        BOOST_LOG_TRIVIAL(debug) << "by-object: tool change to T" << initial_extruder_id << " at Z " << m_max_layer_z
+                                                 << " before object " << finished_objects;
                         file.write(this->set_extruder(initial_extruder_id, initial_layer_print_height, true));
                         prime_extruder = true;
-                    } else {
-                        file.write(this->retract());
+                        // set_extruder() updates the tracked Z if change_filament_gcode moved Z; go back up before the
+                        // XY travel to the next object (no-op when the template left Z alone).
+                        file.write(m_writer.travel_to_z(m_max_layer_z));
                     }
-                    file.write(m_writer.travel_to_z(m_max_layer_z));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
                     m_enable_cooling_markers = true;
                     // Disable motion planner when traveling to first object point.
