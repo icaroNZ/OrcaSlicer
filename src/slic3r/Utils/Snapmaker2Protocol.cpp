@@ -99,7 +99,7 @@ std::string form_body(const std::vector<std::pair<std::string, std::string>>& fi
 
 std::string connect_body(const std::string& token)
 {
-    return token.empty() ? std::string() : form_body({ { "token", token } });
+    return form_body({ { "token", token } });
 }
 
 std::string status_path(const std::string& token) { return "api/v1/status?token=" + url_encode(token); }

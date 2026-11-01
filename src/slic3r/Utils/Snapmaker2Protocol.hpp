@@ -7,7 +7,7 @@
 //
 // Protocol summary (Luban src/server/services/machine/channels/SstpHttpChannel.ts and the touchscreen
 // app's AuthRequestHandler / BaseRequestHandler / MainRequestHandler):
-//   POST api/v1/connect        body "token=<t>" or empty  -> 200 JSON {token, readonly, series, headType, hasEnclosure}
+//   POST api/v1/connect        body "token=<t>" ("token=") -> 200 JSON {token, readonly, series, headType, hasEnclosure}
 //                                                          -> 403 if another client is waiting for approval
 //   GET  api/v1/status?token=  -> 200 JSON once the touchscreen user tapped "Yes",
 //                                 204 while the request is still waiting for approval,
@@ -38,7 +38,10 @@ std::string make_url(const std::string& host, const std::string& path);
 std::string url_encode(const std::string& value);
 std::string form_body(const std::vector<std::pair<std::string, std::string>>& fields);
 
-// Body for api/v1/connect: empty when there is no token (as Luban does), "token=<t>" otherwise.
+// Body for api/v1/connect: always "token=<t>", "token=" when there is no token yet.
+// Luban sends an empty body instead, but Orca's Http only sets CURLOPT_POSTFIELDS for a non-empty body, so an
+// empty POST would make libcurl fall back to its read callback. The touchscreen treats an empty token exactly
+// like a missing one (AuthRequestHandler: unknown token -> createSession()).
 std::string connect_body(const std::string& token);
 
 // "api/v1/status?token=<t>" (path for make_url()).

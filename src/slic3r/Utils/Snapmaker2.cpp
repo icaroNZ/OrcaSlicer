@@ -220,17 +220,20 @@ bool Snapmaker2::open_session(wxString& msg, proto::ConnectInfo& info, ApprovalU
 {
     m_granted              = false;
     const std::string key  = proto::make_url(m_host, "");
-    std::string       token = m_saved_token;
-    const char*       token_source = "printhost_apikey";
+    // A token approved during this run wins over printhost_apikey: the saved one may be stale (touchscreen reset,
+    // or evicted from its list of 10), and upload jobs cannot rewrite the preset, so preferring the saved token
+    // would ask for approval on every upload.
+    std::string token        = cached_token(key);
+    const char* token_source = "session cache";
     if (token.empty()) {
-        token        = cached_token(key);
-        token_source = token.empty() ? "none" : "session cache";
+        token        = m_saved_token;
+        token_source = token.empty() ? "none" : "printhost_apikey";
     }
     m_token = token;
     BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: connecting to " << key << " with token " << proto::mask_token(token) << " (from "
                             << token_source << ")";
 
-    // Empty body without a token, exactly like Luban; the touchscreen then creates a new session.
+    // "token=" without a token (see Snapmaker2Protocol::connect_body); the touchscreen then creates a new session.
     Response r;
     {
         const auto url = proto::make_url(m_host, "api/v1/connect");

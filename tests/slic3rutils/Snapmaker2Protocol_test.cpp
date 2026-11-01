@@ -29,8 +29,9 @@ TEST_CASE("make_url keeps an explicit port and scheme", "[Snapmaker2]")
 
 TEST_CASE("form bodies match what Luban sends", "[Snapmaker2]")
 {
-    // Luban: .send(this.token ? `token=${this.token}` : '')
-    CHECK(connect_body("") == "");
+    // Luban sends '' without a token; Orca's Http needs a non-empty POST body, and the touchscreen treats
+    // "token=" like no token (AuthRequestHandler -> createSession()).
+    CHECK(connect_body("") == "token=");
     CHECK(connect_body("0b0d6e0c-2f8a-4b8e-9a51-1d2a3b4c5d6e") == "token=0b0d6e0c-2f8a-4b8e-9a51-1d2a3b4c5d6e");
     CHECK(form_body({ { "token", "abc" } }) == "token=abc");
     CHECK(form_body({ { "token", "abc" }, { "code", "G28 X" } }) == "token=abc&code=G28%20X");
