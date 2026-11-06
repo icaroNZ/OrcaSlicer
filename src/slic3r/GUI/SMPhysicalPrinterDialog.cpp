@@ -181,7 +181,8 @@ void SMPhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_opt
                     if (!api_key.empty() && api_key != m_config->opt_string("printhost_apikey")) {
                         BOOST_LOG_TRIVIAL(info) << host->get_name() << ": storing the access token returned by the connection test";
                         m_config->opt_string("printhost_apikey") = api_key;
-                        m_optgroup->set_value("printhost_apikey", wxString::FromUTF8(api_key), false);
+                        // The parameter m_optgroup shadows the member and is not captured by this [this] lambda.
+                        this->m_optgroup->set_value("printhost_apikey", wxString::FromUTF8(api_key), false);
                     }
                 }
             }
