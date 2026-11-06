@@ -102,20 +102,23 @@ jobs:
         run: |
             brew install automake texinfo libtool
             brew list
-            # zstd is uninstalled so the deps do not pick up Homebrew's libzstd. The runner's Homebrew git,
-            # however, uses Homebrew curl, which links libzstd: without it git-remote-https aborts
-            # (dyld: Library not loaded: /opt/homebrew/opt/zstd/lib/libzstd.1.dylib) and every
-            # ExternalProject git clone (dep_PNG first) fails. Use Apple's git, which uses the system curl.
+            # Homebrew's zstd must be invisible to the deps build so no dep links it. Unlink it (removes the
+            # /opt/homebrew/{lib,include,lib/pkgconfig} symlinks the deps would find) instead of uninstalling
+            # it: Homebrew's curl links /opt/homebrew/opt/zstd/lib/libzstd.1.dylib, so after an uninstall
+            # git-remote-https aborts (every ExternalProject clone fails, dep_PNG first) and the final
+            # `brew install zstd` cannot download its own bottle. Apple's git (system curl) is also put first
+            # on PATH for the clones, and https cloning is checked before the hour-long build starts.
             mkdir -p "$RUNNER_TEMP/system-git" && ln -sf /usr/bin/git "$RUNNER_TEMP/system-git/git"
             export PATH="$RUNNER_TEMP/system-git:$PATH"
-            brew uninstall --ignore-dependencies zstd
+            brew unlink zstd
+            test ! -e /opt/homebrew/lib/libzstd.dylib && test ! -e /opt/homebrew/include/zstd.h
             git --version && git ls-remote --heads https://github.com/glennrp/libpng.git >/dev/null
             ./build_release_macos.sh -dx -a universal -t 10.15 -1
             for arch in arm64 x86_64; do
                 (cd "${{ github.workspace }}/deps/build/${arch}" && \
                 find . -mindepth 1 -maxdepth 1 ! -name 'OrcaSlicer_dep' -exec rm -rf {} +)
             done
-            brew install zstd
+            brew link zstd
 
 
       - name: Install Ubuntu Build Dependencies
