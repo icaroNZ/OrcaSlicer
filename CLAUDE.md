@@ -329,7 +329,7 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
   Bed and cover assets (`resources/profiles/Snapmaker/Snapmaker A250_*.{stl,svg,png}`) are tracked in this repo.
 - **Port a community fork commit**: 65 fork refs are already fetched under `refs/forks/<owner>/<branch>`. Reviews are in
   `../_snapmaker2-review/fork-reviews/OrcaSlicer/`. Check that a commit applies with `git merge-tree --write-tree --merge-base <c>^ HEAD <c>`. Skill: `orca-port-fork-commit`.
-- **New setting**: use `PrintConfig.cpp` and the tab UI, as described in the upstream text above. Snapmaker flow-variant settings are at `PrintConfig.cpp:4094-4178` and `7375-7607`.
+- **New setting**: use `PrintConfig.cpp` and the tab UI, as described in the upstream text above. Snapmaker flow-variant settings are at `PrintConfig.cpp:4098-4182` and `7379-7611`.
 
 ### Cross-repo interfaces (details in DEPENDENCIES.md / OrcaSlicer.json)
 - `snapmaker-profiles` (sm-profiles) → `submodules/Profiles` bundle. `Orca_Presets` (sm-orca-presets) is the stale predecessor and is not used.
