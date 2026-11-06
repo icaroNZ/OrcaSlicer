@@ -144,6 +144,12 @@ jobs:
         id: filter
         shell: bash
         run: |
+          # A manual run is an explicit request to test this ref. tj-actions/changed-files only sees the
+          # last push range on workflow_dispatch (e.g. a submodule-only commit), which skipped every test.
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            echo "filter=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${{ steps.changed.outputs.core_any_changed }}" = 'true' ] || \
              [ "${{ steps.changed.outputs.cmake_any_changed }}" = 'true' ] || \
              [ "${{ steps.changed.outputs.test_infra_any_changed }}" = 'true' ] || \
@@ -200,7 +206,8 @@ jobs:
           if-no-files-found: warn
 
       - name: Generate HTML report
-        if: always()
+        # No results file exists when the tests were skipped or never ran (build failure).
+        if: always() && hashFiles('build/test-results.xml') != ''
         shell: bash
         run: node scripts/junit-to-html.js build/test-results.xml -t "OrcaSlicer Linux Tests" -o build/test-report.html
 
