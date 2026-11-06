@@ -3,6 +3,7 @@
 
 #include <string>
 #include <map>
+#include <set>
 #include <cstdlib>
 
 #include <imgui/imgui.h>
@@ -66,6 +67,10 @@ class ImGuiWrapper
 #endif // ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
     std::map<wchar_t, int> m_custom_glyph_rects_ids;
     std::string m_clipboard_text;
+    // Glyphs requested at run time on top of the language specific ranges. Object names are
+    // user data and may use any script, so they are not covered by the UI language ranges.
+    std::set<ImWchar> m_extra_glyphs;
+    bool m_font_needs_rebuild{ false };
 
 public:
     struct LastSliderStatus {
@@ -94,6 +99,11 @@ public:
     float get_font_size() const { return m_font_size; }
     float get_style_scaling() const { return m_style_scaling; }
     const ImWchar *get_glyph_ranges() const { return m_glyph_ranges; } // language specific
+
+    // Make sure every character of utf8_text can be rendered, whatever the UI language is.
+    // Characters missing from the atlas are remembered and the atlas is rebuilt at the
+    // beginning of the next frame, so this is safe to call at any time, including mid frame.
+    void require_glyphs(const std::string &utf8_text);
 
     void new_frame();
     void render();

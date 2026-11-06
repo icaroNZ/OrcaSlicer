@@ -520,6 +520,13 @@ void ImGuiWrapper::new_frame()
         return;
     }
 
+    // Glyphs were requested for characters the atlas does not hold yet. Rebuilding between
+    // frames is the only safe point to do it, the atlas is owned by the draw data otherwise.
+    if (m_font_needs_rebuild) {
+        m_font_needs_rebuild = false;
+        destroy_font();
+    }
+
     if (m_font_texture == 0) {
         init_font(true);
     }
@@ -2328,6 +2335,27 @@ bool ImGuiWrapper::contain_all_glyphs(const ImFont      *font,
     return is_chars_in_ranges(fc->GlyphRanges, text.c_str());
 }
 
+void ImGuiWrapper::require_glyphs(const std::string &utf8_text)
+{
+    // The language specific ranges only cover the UI translation. Object names come from the
+    // project file and may use any script, so an English UI would render them as '?' (the ImGui
+    // fallback glyph). Collect whatever is missing and let new_frame() rebuild the atlas.
+    const ImWchar *default_ranges = ImGui::GetIO().Fonts->GetGlyphRangesDefault();
+    const char    *chars_ptr      = utf8_text.c_str();
+    while (*chars_ptr) {
+        unsigned int c     = 0;
+        int          c_len = ImTextCharFromUtf8(&c, chars_ptr, NULL);
+        chars_ptr += c_len;
+        if (c_len == 0) break;
+        // ImWchar is 16 bit, characters outside the BMP cannot be stored in the atlas.
+        if (c == 0 || c > 0xFFFF) continue;
+        if (m_glyph_ranges != nullptr && is_char_in_ranges(m_glyph_ranges, c)) continue;
+        if (default_ranges != nullptr && is_char_in_ranges(default_ranges, c)) continue;
+        if (m_extra_glyphs.insert(static_cast<ImWchar>(c)).second)
+            m_font_needs_rebuild = true;
+    }
+}
+
 bool ImGuiWrapper::is_char_in_ranges(const ImWchar *ranges,
                                      unsigned int   letter)
 {
@@ -2671,6 +2699,10 @@ void ImGuiWrapper::init_font(bool compress)
     ImFontAtlas::GlyphRangesBuilder builder;
     builder.AddRanges(m_glyph_ranges);
     builder.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesDefault());
+    // Characters collected by require_glyphs(), e.g. object names in a script the UI language
+    // does not cover. Without these the text renders as a row of '?'.
+    for (ImWchar c : m_extra_glyphs)
+        builder.AddChar(c);
 #ifdef __APPLE__
     if (m_font_cjk)
         // Apple keyboard shortcuts are only contained in the CJK fonts.

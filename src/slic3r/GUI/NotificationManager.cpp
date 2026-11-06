@@ -2579,6 +2579,18 @@ bool NotificationManager::push_notification_data(const NotificationData& notific
 }
 bool NotificationManager::push_notification_data(std::unique_ptr<NotificationManager::PopNotification> notification, int timestamp)
 {
+	// Notifications embed user supplied text (object names above all), which may use a script the
+	// UI language does not cover. Reserve the glyphs before the notification is ever drawn,
+	// otherwise ImGui falls back to '?' for every such character.
+	if (ImGuiWrapper* imgui = wxGetApp().imgui()) {
+		const NotificationData& data = notification->get_data();
+		imgui->require_glyphs(data.text1);
+		imgui->require_glyphs(data.hypertext);
+		imgui->require_glyphs(data.text2);
+		// Slicing warnings are merged into an existing notification through append(ori_text).
+		imgui->require_glyphs(data.ori_text);
+	}
+
 	// if timestamped notif, push only new one
 	if (timestamp != 0) {
 		if (m_used_timestamps.find(timestamp) == m_used_timestamps.end()) {
