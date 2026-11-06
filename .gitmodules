@@ -1,4 +1,4 @@
 [submodule "submodules/Profiles"]
 	path = submodules/Profiles
-	url = https://github.com/Snapmaker/snapmaker-profiles.git
-	branch = main
+	url = https://github.com/icaroNZ/snapmaker-profiles.git
+	branch = a250t/main
