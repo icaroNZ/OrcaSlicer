@@ -25,6 +25,7 @@
 #include "StepMeshDialog.hpp"
 
 #include <boost/algorithm/string.hpp>
+#include <boost/log/trivial.hpp>
 #include <wx/progdlg.h>
 #include <wx/listbook.h>
 #include <wx/numformatter.h>
@@ -5974,11 +5975,16 @@ void ObjectList::set_extruder_for_selected_items(const int extruder)
             const int obj_idx = m_objects_model->GetObjectIdByItem(item);
             const int vol_idx = m_objects_model->GetVolumeIdByItem(item);
 
-            if ((obj_idx < m_objects->size()) && (obj_idx < (*m_objects)[obj_idx]->volumes.size())) {
-                auto volume_type = (*m_objects)[obj_idx]->volumes[vol_idx]->type();
-                if (volume_type != ModelVolumeType::MODEL_PART && volume_type != ModelVolumeType::PARAMETER_MODIFIER)
-                    continue;
+            // Check vol_idx (not obj_idx) against the volume count before reading volumes[vol_idx].
+            if (obj_idx < 0 || size_t(obj_idx) >= m_objects->size() ||
+                vol_idx < 0 || size_t(vol_idx) >= (*m_objects)[obj_idx]->volumes.size()) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": skipping item with invalid object/volume index "
+                                           << obj_idx << "/" << vol_idx;
+                continue;
             }
+            auto volume_type = (*m_objects)[obj_idx]->volumes[vol_idx]->type();
+            if (volume_type != ModelVolumeType::MODEL_PART && volume_type != ModelVolumeType::PARAMETER_MODIFIER)
+                continue;
         }
 
         if (type & itLayerRoot)
