@@ -77,6 +77,13 @@ def check_filament_compatible_printers(vendor_folder):
             error += 1
             continue
 
+        # Snapmaker keeps rule files (filament_allow_list.json, filament_compatibility.json,
+        # filament_hot_bed_nozzles.json, filaments_colours.json) in the filament folder.
+        # They are not presets and have no "name", so skip them instead of crashing.
+        if not isinstance(data, dict) or 'name' not in data:
+            print_info(f"Skipping non-preset JSON (no 'name'): {file_path}")
+            continue
+
         profile_name = data['name']
         if profile_name in profiles:
             print_error(f"Duplicated profile {profile_name}: {file_path}")
