@@ -1605,6 +1605,23 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    // A filament flow ratio of 0 (or nil) makes GCode::_extrude() multiply and then divide by it,
+    // which writes NaN / huge E values. The config check in Slic3r::validate() only runs on the CLI
+    // path, so refuse it here for every filament the plate uses, including filaments reached only
+    // through a "Change filament" custom G-code (extruders(true)).
+    for (unsigned int filament_id : this->extruders(true)) {
+        const double flow_ratio = get_value_at(m_config, m_config.filament_flow_ratio, ConfigFlowDomain::Filament, filament_id);
+        if (flow_ratio > 0.)
+            continue;
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": filament " << (filament_id + 1) << " has flow ratio " << flow_ratio
+                                   << ", refusing to slice";
+        StringObjectException err;
+        // TRN %1% is the filament number as shown in the filament list, starting from 1.
+        err.string  = (boost::format(L("The flow ratio of filament %1% must be greater than 0.")) % (filament_id + 1)).str();
+        err.opt_key = "filament_flow_ratio";
+        return err;
+    }
+
     if (m_config.print_sequence == PrintSequence::ByObject) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};

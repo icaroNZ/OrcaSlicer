@@ -141,3 +141,26 @@ SCENARIO("Print: Brim generation", "[Print]") {
         }
     }
 }
+
+// Ported from OrcaSlicer #16719 (via aceRage/EdgeSlicer 59cc8413a4 / 4f0714c21a): a filament flow
+// ratio of 0 used to write NaN extrusion lengths in GUI slices; Print::validate() now refuses it.
+static StringObjectException validate_flow_ratio_print(std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> items)
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, items);
+    return print.validate();
+}
+
+TEST_CASE("Print::validate refuses a used filament with a flow ratio of 0", "[Print][validate][Regression]")
+{
+    const StringObjectException err = validate_flow_ratio_print({ { "filament_flow_ratio", "0" } });
+    CHECK(err.opt_key == "filament_flow_ratio");
+    CHECK(err.string.find("filament 1") != std::string::npos);
+}
+
+TEST_CASE("Print::validate accepts a non-zero flow ratio", "[Print][validate]")
+{
+    const StringObjectException err = validate_flow_ratio_print({ { "filament_flow_ratio", "0.95" } });
+    CHECK(err.opt_key != "filament_flow_ratio");
+}
