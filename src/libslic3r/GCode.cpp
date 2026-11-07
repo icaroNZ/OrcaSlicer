@@ -2699,7 +2699,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                              std::to_string(int(thumbnails.front().second.x())) + "x" +
                                                                  std::to_string(int(thumbnails.front().second.y())))
                                     << ", " << sm2_thumbnail_bytes << " bytes (line count is filled in by the G-code processor)";
-    } else if (!is_bbl_printers && boost::starts_with(print.config().printer_model.value, "Snapmaker A")) {
+    } else if (!is_bbl_printers && (boost::starts_with(print.config().printer_model.value, "Snapmaker A2") ||
+                                    boost::starts_with(print.config().printer_model.value, "Snapmaker A3"))) {
+        // e.g. a future "Snapmaker A250T" model name that SnapmakerHeader::is_snapmaker_2() does not know (not Artisan/U1/J1).
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0 header not written: printer_model '" << print.config().printer_model.value
                                    << "' is not a known A250/A350 model";
     }
