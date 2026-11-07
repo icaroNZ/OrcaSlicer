@@ -57,18 +57,29 @@ public:
         bool                      cancelled { false };
     };
 
-    // Interactive session for the bed levelling dialog (Snapmaker2BedLevelDialog).
-    // GUI thread: connect (waiting for the approval on the touchscreen behind a progress dialog) and start a
-    // background api/v1/status poll that keeps the session alive until end_interactive(). Calling it again
-    // reconnects (e.g. after the touchscreen dropped the session). Not while execute_code() runs on a worker.
-    bool        begin_interactive(wxString& msg, Snapmaker2Protocol::ConnectInfo& info);
-    // Stop the keep-alive and disconnect (best effort). Also done by the destructor.
-    void        end_interactive();
+    // Interactive session for the bed levelling dialog (Snapmaker2BedLevelDialog) and the monitor panel
+    // (Snapmaker2MonitorPanel). GUI thread: connect (waiting for the approval on the touchscreen behind a progress
+    // dialog) and start a background api/v1/status poll that keeps the session alive until end_interactive(). Calling
+    // it again reconnects (e.g. after the touchscreen dropped the session). Not while execute_code() / run_command()
+    // runs on a worker. The keep-alive never reconnects by itself: after a 401 the caller decides (user action).
+    // `purpose` is only used in the log.
+    bool        begin_interactive(wxString& msg, Snapmaker2Protocol::ConnectInfo& info, const char* purpose = "bed levelling");
+    // Stop the keep-alive and, with `send_disconnect`, release the session (best effort). Also done by the destructor.
+    // Without it the session is left to whoever shares the token (an upload that took it over) or to the 5 s expiry.
+    void        end_interactive(bool send_disconnect = true);
     bool        interactive() const { return m_keep_alive != nullptr; }
     // One G-code line through api/v1/execute_code. Blocks until the controller finished the line (the touchscreen
     // replies only then) or `timeout_s` passed. Safe from a worker thread between begin_interactive() and
     // end_interactive(). Setting `*cancel` stops waiting within ~1 s; the machine keeps running the line.
     Response    execute_code(const std::string& line, long timeout_s, const std::atomic<bool>* cancel = nullptr) const;
+    // One monitor request (pause/resume/stop, overrides, enclosure, purifier) built by `build` from the session token, see
+    // Snapmaker2Protocol::Command. Same threading and cancel rules as execute_code(). Without an interactive session it
+    // returns NotAuthorised and sends nothing.
+    Response    run_command(const std::function<Snapmaker2Protocol::Command(const std::string& token)>& build, long timeout_s,
+                            const std::atomic<bool>* cancel = nullptr) const;
+    // True while an upload to `host` (print_host value) runs in this process. The upload reuses the token approved in this
+    // run and disconnects at its end, so the monitor panel hands the session over instead of fighting for it.
+    static bool upload_in_progress(const std::string& host);
     // Latest api/v1/status body and HTTP status from the keep-alive poll (thread safe); {"", 0} before the first poll.
     std::string last_status_body() const;
     unsigned    last_status_http() const;

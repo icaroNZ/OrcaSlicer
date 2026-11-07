@@ -55,6 +55,30 @@ void cache_token(const std::string& key, const std::string& token)
     g_token_cache[key] = token;
 }
 
+// Uploads running in this process, per printer URL (Snapmaker2::upload_in_progress()).
+std::mutex                 g_upload_mutex;
+std::map<std::string, int> g_uploads;
+
+struct UploadMark
+{
+    explicit UploadMark(std::string key) : m_key(std::move(key))
+    {
+        std::lock_guard<std::mutex> lock(g_upload_mutex);
+        ++g_uploads[m_key];
+    }
+    ~UploadMark()
+    {
+        std::lock_guard<std::mutex> lock(g_upload_mutex);
+        if (--g_uploads[m_key] <= 0)
+            g_uploads.erase(m_key);
+    }
+    UploadMark(const UploadMark&) = delete;
+    UploadMark& operator=(const UploadMark&) = delete;
+
+private:
+    std::string m_key;
+};
+
 void notify_user(const wxString& text)
 {
     const std::string utf8 = text.ToUTF8().data();
@@ -264,6 +288,8 @@ wxString Snapmaker2::describe_failure(const char* step, const Response& r) const
         return _L("The touchscreen closed the connection (session expired or taken over by another client). Please try again.");
     case Reply::PendingApproval:
         return _L("The connection has not been accepted on the touchscreen yet.");
+    case Reply::GatewayTimeout:
+        return GUI::format_wxstr(_L("The touchscreen got no answer from the controller in time (%1%). Check the machine."), step);
     case Reply::Conflict:
         if (std::string(step) == "prepare_print")
             return _L("The touchscreen refused the G-code file type. Make sure the 3D printing module (single or dual extruder) is mounted "
@@ -446,11 +472,11 @@ nlohmann::json Snapmaker2::get_auth_info()
     return j;
 }
 
-bool Snapmaker2::begin_interactive(wxString& msg, proto::ConnectInfo& info)
+bool Snapmaker2::begin_interactive(wxString& msg, proto::ConnectInfo& info, const char* purpose)
 {
     // Reconnecting: stop the old keep-alive first, it would poll with the old token.
     m_keep_alive.reset();
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: opening an interactive session (bed levelling) to " << m_host;
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: opening an interactive session (" << (purpose ? purpose : "") << ") to " << m_host;
     if (!open_session(msg, info, ApprovalUi::ProgressDialog, TEST_APPROVAL_TIMEOUT_S)) {
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: interactive session not opened: " << msg.ToUTF8().data();
         return false;
@@ -459,13 +485,78 @@ bool Snapmaker2::begin_interactive(wxString& msg, proto::ConnectInfo& info)
     return true;
 }
 
-void Snapmaker2::end_interactive()
+void Snapmaker2::end_interactive(bool send_disconnect)
 {
     if (!m_keep_alive)
         return;
     m_keep_alive.reset();
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: closing the interactive session";
-    close_session();
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: closing the interactive session" << (send_disconnect ? "" : " without disconnect (session handed over)");
+    if (send_disconnect)
+        close_session();
+}
+
+bool Snapmaker2::upload_in_progress(const std::string& host)
+{
+    const std::string key = proto::make_url(host, "");
+    std::lock_guard<std::mutex> lock(g_upload_mutex);
+    auto it = g_uploads.find(key);
+    return it != g_uploads.end() && it->second > 0;
+}
+
+Snapmaker2::Response Snapmaker2::run_command(const std::function<proto::Command(const std::string& token)>& build, long timeout_s,
+                                             const std::atomic<bool>* cancel) const
+{
+    Response r;
+    if (!m_keep_alive || m_token.empty() || !build) {
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: monitor command refused, no interactive session";
+        r.kind  = proto::Reply::NotAuthorised;
+        r.error = "no session";
+        return r;
+    }
+    const proto::Command command = build(m_token);
+    if (!command.valid()) {
+        BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0: monitor command not sent, invalid parameters (" << command.what << ")";
+        r.kind  = proto::Reply::BadRequest;
+        r.error = "invalid command";
+        return r;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: monitor: " << command.what << " -> POST " << log_url(command.path) << " (timeout " << timeout_s
+                            << " s)";
+    const auto start = std::chrono::steady_clock::now();
+    auto       http  = Http::post(proto::make_url(m_host, command.path));
+    http.header("Content-Type", "application/x-www-form-urlencoded")
+        .set_post_body(proto::form_body(command.fields))
+        .timeout_connect(CONNECT_TIMEOUT_S)
+        .timeout_max(timeout_s)
+        .on_complete([&](std::string b, unsigned status) {
+            r.status = status;
+            r.body   = std::move(b);
+        })
+        .on_error([&](std::string b, std::string error, unsigned status) {
+            r.status = status;
+            r.body   = std::move(b);
+            r.error  = std::move(error);
+        })
+        .on_progress([&](Http::Progress, bool& cancel_request) {
+            if (cancel != nullptr && cancel->load()) {
+                cancel_request = true;
+                r.cancelled    = true;
+            }
+        })
+        .perform_sync();
+    r.elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    r.kind      = proto::classify(r.status);
+    if (r.cancelled)
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: monitor: stopped waiting for '" << command.what << "' after " << r.elapsed_s
+                                   << " s (the touchscreen may still carry it out)";
+    else if (r.kind == proto::Reply::Ok)
+        BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: monitor: '" << command.what << "' -> HTTP " << r.status << " after " << r.elapsed_s
+                                << " s, body '" << proto::truncate(r.body) << "'";
+    else
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: monitor: '" << command.what << "' -> HTTP " << r.status << " ("
+                                   << proto::reply_name(r.kind) << ") after " << r.elapsed_s << " s, error: '" << r.error << "' body: '"
+                                   << proto::mask_token_in(proto::truncate(r.body), m_token) << "'";
+    return r;
 }
 
 std::string Snapmaker2::last_status_body() const { return m_keep_alive ? m_keep_alive->last_body() : std::string(); }
@@ -543,6 +634,8 @@ bool Snapmaker2::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Err
         return false;
     }
 
+    // Tells an open monitor panel to hand over the session (same token, so connect is not refused) instead of polling on.
+    UploadMark         upload_mark(proto::make_url(m_host, ""));
     wxString           msg;
     proto::ConnectInfo info;
     // REV-SM2-CANCEL: the upload queue only learns about Cancel (or app shutdown) through progress_fn, which used to be
