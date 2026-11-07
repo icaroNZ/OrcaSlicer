@@ -60,7 +60,7 @@ static void init_degenerate_raft_print(Print& print)
 // Print::_make_wipe_tower now pads the categories to the extruder count with the first
 // entry, as WipeTower2::set_extruder does, so extruder 3 shares extruder 1's category and
 // this print no longer reaches that path; it still guards slicing with a short list.
-static void init_multi_extruder_print(Print& print, const std::string& adhesiveness_categories, int wall_filament)
+static void init_multi_extruder_print(Print& print, const std::string& adhesiveness_categories, int wall_filament, bool gcode_comments = false)
 {
     DynamicPrintConfig config = Test::default_print_config();
     config.set_deserialize_strict({
@@ -71,6 +71,7 @@ static void init_multi_extruder_print(Print& print, const std::string& adhesiven
         { "enable_prime_tower",             true },
         { "filament_adhesiveness_category", adhesiveness_categories },
         { "wipe_tower_filament",            wall_filament },
+        { "gcode_comments",                 gcode_comments },
         { "machine_start_gcode",            "" },
         // Same validation constraint as above: relative-E Marlin needs G92 E0 per layer.
         { "layer_change_gcode",             "G92 E0" }
@@ -179,6 +180,30 @@ SCENARIO("Wipe tower with a single adhesiveness category for all extruders", "[W
                 REQUIRE(gcode.find("CP TOOLCHANGE START") != std::string::npos);
                 REQUIRE(gcode.find("\nT1") != std::string::npos);
                 REQUIRE(gcode.find("\nT2") != std::string::npos);
+            }
+        }
+    }
+}
+
+SCENARIO("The final purge travels to the wipe tower with a retract and lift (#1149)", "[WipeTower]")
+{
+    GIVEN("3 extruders, objects on extruders 2/3, G-code comments on")
+    {
+        Print print;
+        Test::init_multi_extruder_print(print, "50,60,70", 3, true);
+
+        WHEN("the G-code is exported")
+        {
+            const std::string gcode = Test::gcode(print);
+            THEN("the last tool-change block (the final purge) follows a 'Travel to a Wipe Tower' move of the last layer")
+            {
+                const size_t final_purge = gcode.rfind("; CP TOOLCHANGE START");
+                REQUIRE(final_purge != std::string::npos);
+                const size_t last_layer = gcode.rfind(";LAYER_CHANGE", final_purge);
+                REQUIRE(last_layer != std::string::npos);
+                const size_t travel = gcode.rfind("Travel to a Wipe Tower", final_purge);
+                REQUIRE(travel != std::string::npos);
+                CHECK(travel > last_layer);
             }
         }
     }
