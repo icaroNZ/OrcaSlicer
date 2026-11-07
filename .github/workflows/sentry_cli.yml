@@ -24,7 +24,14 @@ jobs:
   upload_symbols:
     name: Upload Debug Symbols to Sentry
     runs-on: ${{ inputs.os }}
+    env:
+      # Forks and CI copies (e.g. icaroNZ/snapmaker-orca-a250t) have no Sentry project; skip the uploads there
+      # instead of failing the build with "organization not found".
+      HAS_SENTRY: ${{ secrets.SENTRY_AUTH_TOKEN != '' && secrets.SENTRY_ORG != '' && secrets.SENTRY_PROJECT != '' }}
     steps:
+      - name: Report Sentry configuration
+        run: echo "Sentry upload enabled: ${{ env.HAS_SENTRY }}"
+        shell: bash
       # ==================== Windows ====================
       - name: "[Windows] Install sentry-cli via choco"
         if: inputs.os == 'windows-2022'
@@ -60,7 +67,7 @@ jobs:
           }
 
       - name: "[Windows] Upload PDB to Sentry (sentry-cli)"
-        if: inputs.os == 'windows-2022'
+        if: inputs.os == 'windows-2022' && env.HAS_SENTRY == 'true'
         shell: pwsh
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -131,7 +138,7 @@ jobs:
           path: ./symbols
 
       - name: "[macOS] Upload dSYM to Sentry (sentry-cli)"
-        if: inputs.os == 'macos-15'
+        if: inputs.os == 'macos-15' && env.HAS_SENTRY == 'true'
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_LOG_LEVEL: debug
