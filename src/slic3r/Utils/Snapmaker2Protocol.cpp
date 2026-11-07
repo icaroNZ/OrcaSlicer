@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 
 #include "nlohmann/json.hpp"
@@ -37,6 +38,22 @@ nlohmann::json parse_object(const std::string& body)
     if (j.is_discarded() || !j.is_object())
         return nlohmann::json();
     return j;
+}
+
+bool contains_nocase(const std::string& haystack, const char* needle)
+{
+    const std::string n(needle);
+    return std::search(haystack.begin(), haystack.end(), n.begin(), n.end(), [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+           }) != haystack.end();
+}
+
+bool number_field(const nlohmann::json& j, const char* key, double& out)
+{
+    if (!j.contains(key) || !j[key].is_number())
+        return false;
+    out = j[key].get<double>();
+    return true;
 }
 
 } // namespace
@@ -197,6 +214,121 @@ int start_print_code(const std::string& body)
     if (j.is_null() || !j.contains("code") || !j["code"].is_number_integer())
         return -1;
     return j["code"].get<int>();
+}
+
+LevelParams clamp_level_params(int grid, int bed_temp_c, int soak_s)
+{
+    LevelParams p;
+    p.grid       = std::min(std::max(grid, LEVEL_GRID_MIN), LEVEL_GRID_MAX);
+    p.bed_temp_c = std::min(std::max(bed_temp_c, 0), LEVEL_BED_MAX_C);
+    p.soak_s     = p.bed_temp_c == 0 ? 0 : std::min(std::max(soak_s, 0), LEVEL_SOAK_MAX_S);
+    return p;
+}
+
+std::string level_gcode(const LevelParams& params)
+{
+    std::string line = "G1029 A P" + std::to_string(params.grid);
+    if (params.bed_temp_c > 0)
+        line += " H" + std::to_string(params.bed_temp_c) + " K" + std::to_string(params.soak_s);
+    return line;
+}
+
+long level_timeout_s(const LevelParams& params)
+{
+    // Heating an A250 bed to 110 C takes ~10 min (longer in a cold enclosure): allow 30 min. Homing ~1 min,
+    // ~15 s per probe point, plus 10 min of margin. 11x11 at 110 C with a 60 min soak: 1800+3600+60+1815+600 s.
+    const long heat  = params.bed_temp_c > 0 ? 30L * 60 + params.soak_s : 0;
+    const long probe = 60L + 15L * params.grid * params.grid;
+    return heat + probe + 10L * 60;
+}
+
+LevelResult classify_level_reply(const std::string& body, double elapsed_s)
+{
+    if (contains_nocase(body, "cannot do auto leveling without 3DP"))
+        return LevelResult::NoSingleHead;
+    if (contains_nocase(body, "heat soak refused"))
+        return LevelResult::BedFault;
+    if (contains_nocase(body, "heat soak aborted"))
+        return LevelResult::SoakAborted;
+    if (contains_nocase(body, "auto leveling cancelled"))
+        return LevelResult::Cancelled;
+    if (contains_nocase(body, "auto probing fail"))
+        return LevelResult::ProbeFailed;
+    if (contains_nocase(body, "Invalid grid size"))
+        return LevelResult::InvalidGrid;
+    if (elapsed_s < LEVEL_MIN_PLAUSIBLE_S)
+        return LevelResult::TooFast;
+    return LevelResult::Done;
+}
+
+const char* level_result_name(LevelResult result)
+{
+    switch (result) {
+    case LevelResult::Done: return "done";
+    case LevelResult::NoSingleHead: return "no-single-3dp-head";
+    case LevelResult::BedFault: return "bed-fault";
+    case LevelResult::SoakAborted: return "soak-aborted";
+    case LevelResult::Cancelled: return "cancelled";
+    case LevelResult::ProbeFailed: return "probe-failed";
+    case LevelResult::InvalidGrid: return "invalid-grid";
+    case LevelResult::TooFast: return "too-fast";
+    }
+    return "unknown";
+}
+
+std::string soak_abort_reason(const std::string& body)
+{
+    const std::string marker = "heat soak aborted: ";
+    const size_t      pos    = body.find(marker);
+    if (pos == std::string::npos)
+        return {};
+    const size_t start = pos + marker.size();
+    const size_t end   = body.find_first_of("\r\n", start);
+    return trim(body.substr(start, end == std::string::npos ? std::string::npos : end - start));
+}
+
+std::string format_mm(double mm)
+{
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.3f", mm);
+    std::string s(buf);
+    while (!s.empty() && s.back() == '0')
+        s.pop_back();
+    if (!s.empty() && s.back() == '.')
+        s.pop_back();
+    if (s == "-0")
+        s = "0";
+    return s;
+}
+
+std::vector<std::string> jog_z_gcodes(double step_mm)
+{
+    if (!std::isfinite(step_mm) || std::fabs(step_mm) > JOG_MAX_STEP_MM || format_mm(step_mm) == "0")
+        return {};
+    return { "G91", "G1 Z" + format_mm(step_mm) + " F" + std::to_string(JOG_FEEDRATE), "G90" };
+}
+
+std::string save_z_zero_gcode() { return "G1029 S0"; }
+
+std::vector<std::pair<std::string, std::string>> execute_code_fields(const std::string& token, const std::string& code)
+{
+    const size_t eol = code.find_first_of("\r\n");
+    return { { "token", token }, { "code", trim(eol == std::string::npos ? code : code.substr(0, eol)) } };
+}
+
+StatusSnapshot parse_status(const std::string& status_body)
+{
+    StatusSnapshot snap;
+    nlohmann::json j = parse_object(status_body);
+    if (j.is_null())
+        return snap;
+    snap.valid   = true;
+    snap.status  = machine_status(status_body);
+    snap.has_bed = number_field(j, "heatedBedTemperature", snap.bed_c);
+    if (snap.has_bed)
+        number_field(j, "heatedBedTargetTemperature", snap.bed_target_c);
+    snap.has_z = number_field(j, "z", snap.z);
+    return snap;
 }
 
 std::string mask_token(const std::string& token)

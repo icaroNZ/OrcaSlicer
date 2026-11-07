@@ -3,6 +3,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <string>
+#include <vector>
+
 #include "slic3r/Utils/Snapmaker2Protocol.hpp"
 
 using namespace Slic3r::Snapmaker2Protocol;
@@ -116,4 +120,125 @@ TEST_CASE("tokens never reach the log in full", "[Snapmaker2]")
     CHECK(mask_token_in("no token here", "") == "no token here");
     CHECK(truncate("short") == "short");
     CHECK(truncate(std::string(400, 'x'), 10) == std::string(10, 'x') + "...(400 bytes)");
+}
+
+TEST_CASE("bed levelling G-code follows the G1029 A contract", "[Snapmaker2][level]")
+{
+    // Contract: G1029 A [P<grid>] [H<bed C>] [K<soak s>] (features/bed-levelling-heat-soak.md).
+    CHECK(level_gcode(clamp_level_params(5, 60, 300)) == "G1029 A P5 H60 K300");
+    CHECK(level_gcode(clamp_level_params(11, 110, 3600)) == "G1029 A P11 H110 K3600");
+    CHECK(level_gcode(clamp_level_params(3, 60, 0)) == "G1029 A P3 H60 K0");
+    // No heating: H and K are left out, the soak is dropped like the firmware does.
+    CHECK(level_gcode(clamp_level_params(7, 0, 600)) == "G1029 A P7");
+
+    const LevelParams p = clamp_level_params(1, 150, 9000);
+    CHECK(p.grid == LEVEL_GRID_MIN);
+    CHECK(p.bed_temp_c == LEVEL_BED_MAX_C);
+    CHECK(p.soak_s == LEVEL_SOAK_MAX_S);
+    CHECK(clamp_level_params(42, -5, 100).grid == LEVEL_GRID_MAX);
+    CHECK(clamp_level_params(42, -5, 100).bed_temp_c == 0);
+    CHECK(clamp_level_params(42, -5, 100).soak_s == 0);
+    CHECK(clamp_level_params(4, 60, -1).soak_s == 0);
+    CHECK(LEVEL_SOAK_MAX_MIN == 60);
+}
+
+TEST_CASE("bed levelling timeout covers heat-up, soak and probing", "[Snapmaker2][level]")
+{
+    // 3x3 without heating: homing 60 s + 9 points x 15 s + 600 s margin.
+    CHECK(level_timeout_s(clamp_level_params(3, 0, 0)) == 60 + 135 + 600);
+    // 11x11, 110 C, 60 min soak: 30 min heat-up + 3600 s + 60 + 1815 + 600.
+    CHECK(level_timeout_s(clamp_level_params(11, 110, 3600)) == 1800 + 3600 + 60 + 1815 + 600);
+    // The soak always adds to the timeout.
+    CHECK(level_timeout_s(clamp_level_params(5, 60, 600)) - level_timeout_s(clamp_level_params(5, 60, 0)) == 600);
+}
+
+TEST_CASE("bed levelling replies are classified from the controller output", "[Snapmaker2][level]")
+{
+    const std::string done = "echo:heat soak: bed 60C, soak 300s\necho:soak 300s left\necho:heat soak done\nok";
+    CHECK(classify_level_reply(done, 900.) == LevelResult::Done);
+    // Without H there is no heat soak line at all; a plain "ok" after a few minutes is success.
+    CHECK(classify_level_reply("ok", 120.) == LevelResult::Done);
+    CHECK(classify_level_reply("", 120.) == LevelResult::Done);
+    // Stock firmware: P first, sets the grid and returns at once without probing.
+    CHECK(classify_level_reply("Set grid size : 5\nok", 0.4) == LevelResult::TooFast);
+
+    CHECK(classify_level_reply("cannot do auto leveling without 3DP\nok", 0.2) == LevelResult::NoSingleHead);
+    CHECK(classify_level_reply("heat soak refused: bed fault\nauto leveling cancelled\n", 0.3) == LevelResult::BedFault);
+    const std::string aborted = "echo:soak 120s left\r\necho:heat soak aborted: emergency stop\r\nauto leveling cancelled\r\nok";
+    CHECK(classify_level_reply(aborted, 400.) == LevelResult::SoakAborted);
+    CHECK(soak_abort_reason(aborted) == "emergency stop");
+    CHECK(soak_abort_reason("echo:heat soak aborted: screen exit") == "screen exit");
+    CHECK(soak_abort_reason(done).empty());
+    CHECK(classify_level_reply("AUTO LEVELING CANCELLED", 30.) == LevelResult::Cancelled);
+    CHECK(classify_level_reply("auto probing fail !\nok", 200.) == LevelResult::ProbeFailed);
+    CHECK(classify_level_reply("Invalid grid size, range: 2 - 11", 0.1) == LevelResult::InvalidGrid);
+    CHECK(std::string(level_result_name(LevelResult::TooFast)) == "too-fast");
+    CHECK(std::string(level_result_name(LevelResult::Done)) == "done");
+}
+
+TEST_CASE("nozzle-zero jog and save lines", "[Snapmaker2][level]")
+{
+    CHECK(format_mm(0.05) == "0.05");
+    CHECK(format_mm(-0.05) == "-0.05");
+    CHECK(format_mm(0.1) == "0.1");
+    CHECK(format_mm(0.5) == "0.5");
+    CHECK(format_mm(-0.0001) == "0");
+    CHECK(format_mm(1.0) == "1");
+
+    const std::vector<std::string> down = jog_z_gcodes(-0.05);
+    REQUIRE(down.size() == 3);
+    CHECK(down[0] == "G91");
+    CHECK(down[1] == "G1 Z-0.05 F300");
+    CHECK(down[2] == "G90");
+    const std::vector<std::string> up = jog_z_gcodes(0.5);
+    REQUIRE(up.size() == 3);
+    CHECK(up[1] == "G1 Z0.5 F300");
+    // The touchscreen URL-decodes "code" twice: a '+' would become a space.
+    for (const auto& line : jog_z_gcodes(0.1))
+        CHECK(line.find('+') == std::string::npos);
+    CHECK(jog_z_gcodes(0.).empty());
+    CHECK(jog_z_gcodes(1.5).empty());
+    CHECK(jog_z_gcodes(-2.).empty());
+    CHECK(jog_z_gcodes(std::nan("")).empty());
+
+    CHECK(save_z_zero_gcode() == "G1029 S0");
+}
+
+TEST_CASE("execute_code sends one line with the token", "[Snapmaker2][level]")
+{
+    const auto fields = execute_code_fields("tok", "G1029 A P5 H60 K300");
+    REQUIRE(fields.size() == 2);
+    CHECK(fields[0].first == "token");
+    CHECK(fields[0].second == "tok");
+    CHECK(fields[1].first == "code");
+    CHECK(fields[1].second == "G1029 A P5 H60 K300");
+    CHECK(form_body(fields) == "token=tok&code=G1029%20A%20P5%20H60%20K300");
+    // Only the first line: the touchscreen would silently drop the rest.
+    CHECK(execute_code_fields("t", "G91\nG1 Z-0.05 F300\nG90")[1].second == "G91");
+    CHECK(execute_code_fields("t", " G90\r\n")[1].second == "G90");
+    CHECK(form_body(execute_code_fields("t", "G1 Z-0.05 F300")) == "token=t&code=G1%20Z-0.05%20F300");
+}
+
+TEST_CASE("status snapshot for the levelling progress", "[Snapmaker2][level]")
+{
+    const auto s = parse_status(
+        R"({"status":"IDLE","x":117.5,"y":125,"z":12.25,"homed":true,"toolHead":"TOOLHEAD_3DPRINTING_1",)"
+        R"("nozzleTemperature":24,"nozzleTargetTemperature":0,"heatedBedTemperature":58.4,"heatedBedTargetTemperature":60})");
+    CHECK(s.valid);
+    CHECK(s.status == "IDLE");
+    CHECK(s.has_bed);
+    CHECK(s.bed_c == 58.4);
+    CHECK(s.bed_target_c == 60.);
+    CHECK(s.has_z);
+    CHECK(s.z == 12.25);
+
+    // Laser / CNC heads report no bed values.
+    const auto laser = parse_status(R"({"status":"RUNNING","z":3,"laserPower":0})");
+    CHECK(laser.valid);
+    CHECK(laser.status == "RUNNING");
+    CHECK_FALSE(laser.has_bed);
+    CHECK(laser.has_z);
+
+    CHECK_FALSE(parse_status("").valid);
+    CHECK_FALSE(parse_status("Machine is printing now, movement rejected.").valid);
 }
