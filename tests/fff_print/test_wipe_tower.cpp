@@ -195,15 +195,22 @@ SCENARIO("The final purge travels to the wipe tower with a retract and lift (#11
         WHEN("the G-code is exported")
         {
             const std::string gcode = Test::gcode(print);
-            THEN("the last tool-change block (the final purge) follows a 'Travel to a Wipe Tower' move of the last layer")
+            THEN("the last tool-change block (the final purge) is preceded by its own 'Travel to a Wipe Tower' move")
             {
                 const size_t final_purge = gcode.rfind("; CP TOOLCHANGE START");
                 REQUIRE(final_purge != std::string::npos);
+                REQUIRE(final_purge > 0);
                 const size_t last_layer = gcode.rfind(";LAYER_CHANGE", final_purge);
                 REQUIRE(last_layer != std::string::npos);
+                // The last layer's finish/empty-grid block (is_finish_first) also travels to the tower with the same comment,
+                // so the travel must come after the end marker of the block before the final purge, not just after the
+                // last layer change; otherwise this passes on the pre-#1150 code.
+                const size_t previous_block = gcode.rfind("; CP ", final_purge - 1);
+                REQUIRE(previous_block != std::string::npos);
                 const size_t travel = gcode.rfind("Travel to a Wipe Tower", final_purge);
                 REQUIRE(travel != std::string::npos);
                 CHECK(travel > last_layer);
+                CHECK(travel > previous_block);
             }
         }
     }

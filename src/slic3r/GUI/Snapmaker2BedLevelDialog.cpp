@@ -666,9 +666,20 @@ void Snapmaker2BedLevelDialog::on_jog(double step_mm)
     wxBusyCursor busy;
     LineLock     lock(*this);
     wxString     error;
+    bool         move_sent = false;
     for (const std::string& line : lines) {
+        // Count the step once the G1 line has been sent, even if it (or the G90 after it) fails: the controller may have
+        // moved, and over-counting only makes the deep-jog confirmation come earlier (safer for the bed).
+        if (line.rfind("G1 ", 0) == 0)
+            move_sent = true;
         if (!run_line(line, error)) {
             BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0: jog line '" << line << "' failed";
+            if (move_sent) {
+                m_jog_total_mm += step_mm;
+                BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: jog " << proto::format_mm(step_mm)
+                                           << " mm counted although a line failed, total " << proto::format_mm(m_jog_total_mm)
+                                           << " mm since probing";
+            }
             // Never leave the controller in relative mode after a failed move.
             if (line != "G90") {
                 wxString ignored;
