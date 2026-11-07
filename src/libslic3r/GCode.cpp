@@ -816,6 +816,9 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // with retract + lift, as v2.4.0 did.
     const bool is_final_purge = new_extruder_id < 0;
     if (!tcr.priming && (tcr.is_finish_first || will_go_down || is_final_purge)) {
+        if (is_final_purge)
+            BOOST_LOG_TRIVIAL(debug) << "final purge: retract + travel to the wipe tower at (" << start_pos.x() << ", " << start_pos.y()
+                                     << ") z=" << current_z;
         // Move over the wipe tower.
         gcode += gcodegen.retract();
         gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
@@ -837,9 +840,6 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     const bool is_ramming = (gcodegen.config().single_extruder_multi_material) ||
         (!gcodegen.config().single_extruder_multi_material &&
             get_value_at(gcodegen.config(), gcodegen.config().filament_multitool_ramming, ConfigFlowDomain::Filament, tcr.initial_tool));
-    const bool should_travel_to_tower = !tcr.priming && (tcr.force_travel     // wipe tower says so
-        || !needs_toolchange // this is just finishing the tower with no toolchange
-        || is_ramming);
 
     // Check whether this TCR carries a separate nozzle change (ramming) result.
     bool has_nozzle_change = !tcr.nozzle_change_result.gcode.empty()
