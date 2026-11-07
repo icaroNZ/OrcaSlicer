@@ -30,7 +30,7 @@ jobs:
       HAS_SENTRY: ${{ secrets.SENTRY_AUTH_TOKEN != '' && secrets.SENTRY_ORG != '' && secrets.SENTRY_PROJECT != '' }}
     steps:
       - name: Report Sentry configuration
-        run: echo "Sentry upload enabled: ${{ env.HAS_SENTRY }}"
+        run: 'echo "Sentry upload enabled=${{ env.HAS_SENTRY }}"'
         shell: bash
       # ==================== Windows ====================
       - name: "[Windows] Install sentry-cli via choco"
