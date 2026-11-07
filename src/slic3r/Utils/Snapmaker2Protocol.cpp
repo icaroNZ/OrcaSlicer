@@ -56,6 +56,38 @@ bool number_field(const nlohmann::json& j, const char* key, double& out)
     return true;
 }
 
+bool bool_field(const nlohmann::json& j, const char* key, bool& out)
+{
+    if (!j.contains(key) || !j[key].is_boolean())
+        return false;
+    out = j[key].get<bool>();
+    return true;
+}
+
+bool string_field(const nlohmann::json& j, const char* key, std::string& out)
+{
+    if (!j.contains(key) || !j[key].is_string())
+        return false;
+    out = j[key].get<std::string>();
+    return true;
+}
+
+// Whole number without locale effects ("%d" ignores LC_NUMERIC, but keep one formatter for every value we send).
+std::string format_int(long long v) { return std::to_string(v); }
+
+int clamp_int(double v, int lo, int hi)
+{
+    if (!std::isfinite(v))
+        return lo;
+    const double r = std::round(v);
+    return r < lo ? lo : (r > hi ? hi : int(r));
+}
+
+Command token_only(const char* path, const std::string& token, const char* what)
+{
+    return Command{ path, { { "token", token } }, what };
+}
+
 } // namespace
 
 std::string make_url(const std::string& host_in, const std::string& path_in)
@@ -134,6 +166,7 @@ Reply classify(unsigned http_status)
     case 401: return Reply::NotAuthorised;
     case 403: return Reply::Busy;
     case 409: return Reply::Conflict;
+    case 504: return Reply::GatewayTimeout;
     default: return Reply::HttpError;
     }
 }
@@ -147,6 +180,7 @@ const char* reply_name(Reply reply)
     case Reply::BadRequest: return "bad-request";
     case Reply::Busy: return "busy";
     case Reply::Conflict: return "conflict";
+    case Reply::GatewayTimeout: return "gateway-timeout";
     case Reply::HttpError: return "http-error";
     case Reply::NetworkError: return "network-error";
     }
@@ -500,11 +534,226 @@ StatusSnapshot parse_status(const std::string& status_body)
         return snap;
     snap.valid   = true;
     snap.status  = machine_status(status_body);
+    string_field(j, "printStatus", snap.print_status);
+    string_field(j, "toolHead", snap.tool_head);
     snap.has_bed = number_field(j, "heatedBedTemperature", snap.bed_c);
     if (snap.has_bed)
         number_field(j, "heatedBedTargetTemperature", snap.bed_target_c);
     snap.has_z = number_field(j, "z", snap.z);
+
+    if (number_field(j, "nozzleTemperature1", snap.nozzle_c[0])) {
+        snap.nozzles = 1;
+        number_field(j, "nozzleTargetTemperature1", snap.nozzle_target_c[0]);
+        if (number_field(j, "nozzleTemperature2", snap.nozzle_c[1])) {
+            snap.nozzles = 2;
+            number_field(j, "nozzleTargetTemperature2", snap.nozzle_target_c[1]);
+        }
+    } else if (number_field(j, "nozzleTemperature", snap.nozzle_c[0])) {
+        snap.nozzles = 1;
+        number_field(j, "nozzleTargetTemperature", snap.nozzle_target_c[0]);
+    }
+    snap.has_feed_rate = number_field(j, "workSpeed", snap.feed_rate);
+
+    // The job block comes as a whole; "progress" is always part of it.
+    snap.has_job = number_field(j, "progress", snap.progress);
+    if (snap.has_job) {
+        if (!std::isfinite(snap.progress))
+            snap.progress = 0.;
+        snap.progress = std::min(1., std::max(0., snap.progress));
+        string_field(j, "fileName", snap.file_name);
+        number_field(j, "elapsedTime", snap.elapsed_s);
+        number_field(j, "remainingTime", snap.remaining_s);
+        number_field(j, "estimatedTime", snap.estimated_s);
+        number_field(j, "currentLine", snap.current_line);
+        number_field(j, "totalLines", snap.total_lines);
+    }
+
+    bool_field(j, "isFilamentOut", snap.filament_out);
+    bool_field(j, "isEmergencyStopped", snap.emergency_stopped);
+    if (j.contains("moduleList") && j["moduleList"].is_object()) {
+        const nlohmann::json& modules = j["moduleList"];
+        bool_field(modules, "enclosure", snap.enclosure_module);
+        bool_field(modules, "airPurifier", snap.purifier_module);
+    }
+    snap.has_door           = bool_field(j, "isEnclosureDoorOpen", snap.door_open);
+    snap.has_purifier_state = bool_field(j, "airPurifierSwitch", snap.purifier_on);
+    double fan_speed        = 0.;
+    if (number_field(j, "airPurifierFanSpeed", fan_speed) && std::isfinite(fan_speed))
+        snap.purifier_fan_speed = int(std::lround(fan_speed));
     return snap;
+}
+
+Command pause_command(const std::string& token) { return token_only("api/v1/pause_print", token, "pause"); }
+Command resume_command(const std::string& token) { return token_only("api/v1/resume_print", token, "resume"); }
+Command stop_command(const std::string& token) { return token_only("api/v1/stop_print", token, "stop"); }
+
+Command nozzle_temperature_command(const std::string& token, int index, int nozzle_count, double temp_c)
+{
+    const int count = std::max(1, nozzle_count);
+    if (index < 0 || index >= count)
+        return Command();
+    const std::string t = format_int(clamp_int(temp_c, 0, MONITOR_NOZZLE_MAX_C));
+    if (count >= 2)
+        return Command{ "api/v1/override_nozzle_temperature_by_index",
+                        { { "token", token }, { "extruderTemperature", t }, { "extruderIndex", format_int(index) } },
+                        "nozzle T" + format_int(index) + " temperature " + t + " C" };
+    return Command{ "api/v1/override_nozzle_temperature", { { "token", token }, { "nozzleTemp", t } }, "nozzle temperature " + t + " C" };
+}
+
+Command bed_temperature_command(const std::string& token, double temp_c)
+{
+    const std::string t = format_int(clamp_int(temp_c, 0, MONITOR_BED_MAX_C));
+    return Command{ "api/v1/override_bed_temperature", { { "token", token }, { "heatedBedTemp", t } }, "bed temperature " + t + " C" };
+}
+
+Command z_offset_command(const std::string& token, double absolute_mm)
+{
+    const double      mm = std::isfinite(absolute_mm) ?
+                               std::min(MONITOR_Z_OFFSET_MAX_MM, std::max(MONITOR_Z_OFFSET_MIN_MM, absolute_mm)) :
+                               0.;
+    const std::string v  = format_mm(mm);
+    return Command{ "api/v1/override_z_offset", { { "token", token }, { "zOffset", v } }, "live Z offset " + v + " mm" };
+}
+
+Command work_speed_command(const std::string& token, int percent)
+{
+    const std::string v = format_int(std::min(MONITOR_WORK_SPEED_MAX, std::max(MONITOR_WORK_SPEED_MIN, percent)));
+    return Command{ "api/v1/override_work_speed", { { "token", token }, { "workSpeed", v } }, "work speed " + v + " %" };
+}
+
+Command enclosure_light_command(const std::string& token, bool on)
+{
+    return Command{ "api/v1/enclosure", { { "token", token }, { "led", on ? "100" : "0" } }, on ? "enclosure light on" : "enclosure light off" };
+}
+
+Command enclosure_fan_command(const std::string& token, bool on)
+{
+    return Command{ "api/v1/enclosure", { { "token", token }, { "fan", on ? "100" : "0" } }, on ? "enclosure fan on" : "enclosure fan off" };
+}
+
+Command purifier_switch_command(const std::string& token, bool on)
+{
+    return Command{ "api/v1/air_purifier_switch", { { "token", token }, { "switch", on ? "true" : "false" } },
+                    on ? "air purifier on" : "air purifier off" };
+}
+
+Command purifier_fan_speed_command(const std::string& token, int level)
+{
+    const std::string v = format_int(std::min(MONITOR_PURIFIER_LEVEL_MAX, std::max(MONITOR_PURIFIER_LEVEL_MIN, level)));
+    return Command{ "api/v1/air_purifier_fan_speed", { { "token", token }, { "fan_speed", v } }, "air purifier fan level " + v };
+}
+
+double next_z_offset(double current_mm, double step_mm)
+{
+    if (!std::isfinite(current_mm))
+        current_mm = 0.;
+    if (!std::isfinite(step_mm))
+        step_mm = 0.;
+    const double v = std::round((current_mm + step_mm) * 100.) / 100.;
+    const double c = std::min(MONITOR_Z_OFFSET_MAX_MM, std::max(MONITOR_Z_OFFSET_MIN_MM, v));
+    return c == 0. ? 0. : c; // no "-0"
+}
+
+MonitorState monitor_state(const StatusSnapshot& snapshot)
+{
+    if (!snapshot.valid || snapshot.status.empty())
+        return MonitorState::Unknown;
+    if (snapshot.status == "RUNNING")
+        return MonitorState::Printing;
+    if (snapshot.status == "PAUSED")
+        return MonitorState::Paused;
+    std::string job = snapshot.print_status;
+    for (char& c : job)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return job == "complete" ? MonitorState::Finished : MonitorState::Idle;
+}
+
+const char* monitor_state_name(MonitorState state)
+{
+    switch (state) {
+    case MonitorState::Unknown: return "unknown";
+    case MonitorState::Idle: return "idle";
+    case MonitorState::Printing: return "printing";
+    case MonitorState::Paused: return "paused";
+    case MonitorState::Finished: return "finished";
+    }
+    return "unknown";
+}
+
+MonitorControls monitor_controls(const StatusSnapshot& snapshot, const ConnectInfo& info, bool command_running)
+{
+    MonitorControls c;
+    const bool dual = snapshot.nozzles >= 2 || info.head_type == 5;
+    c.nozzle_count  = dual ? 2 : 1;
+    if (command_running || info.readonly || !snapshot.valid)
+        return c;
+    const MonitorState state  = monitor_state(snapshot);
+    const bool         active = state == MonitorState::Printing || state == MonitorState::Paused;
+    const bool         fdm    = is_printing_head(info.head_type) || snapshot.nozzles > 0;
+    c.pause      = state == MonitorState::Printing;
+    c.resume     = state == MonitorState::Paused;
+    c.stop       = active;
+    c.nozzle     = active && fdm;
+    c.bed        = active && fdm;
+    c.z_offset   = active && fdm;
+    c.work_speed = active;
+    c.enclosure  = info.has_enclosure || snapshot.enclosure_module;
+    c.purifier   = snapshot.purifier_module;
+    return c;
+}
+
+bool job_changed(const StatusSnapshot& previous, const StatusSnapshot& current)
+{
+    if (!current.has_job)
+        return false;
+    if (!previous.has_job)
+        return true;
+    if (previous.file_name != current.file_name)
+        return true;
+    // Same file printed again: the tick counter restarts (allow a few seconds of jitter).
+    return current.elapsed_s + 5. < previous.elapsed_s;
+}
+
+LinkState link_state(unsigned last_http, long ms_since_last_ok)
+{
+    if (last_http == 401)
+        return LinkState::Lost;
+    if (last_http == 200 && ms_since_last_ok < MONITOR_LINK_LOST_MS)
+        return LinkState::Ok;
+    return ms_since_last_ok >= MONITOR_LINK_LOST_MS ? LinkState::Lost : LinkState::Waiting;
+}
+
+const char* link_state_name(LinkState state)
+{
+    switch (state) {
+    case LinkState::Ok: return "ok";
+    case LinkState::Waiting: return "waiting";
+    case LinkState::Lost: return "lost";
+    }
+    return "unknown";
+}
+
+bool idle_disconnect_due(long idle_s, int limit_min) { return limit_min > 0 && idle_s >= 60L * limit_min; }
+
+std::string format_duration(double seconds)
+{
+    if (!std::isfinite(seconds) || seconds < 0.)
+        return "-";
+    const long long total = std::llround(std::min(seconds, 1e9));
+    const long long h = total / 3600, m = (total % 3600) / 60, s = total % 60;
+    auto two = [](long long v) { return (v < 10 ? "0" : "") + std::to_string(v); };
+    if (h > 0)
+        return std::to_string(h) + " h " + two(m) + " min";
+    if (m > 0)
+        return std::to_string(m) + " min " + two(s) + " s";
+    return std::to_string(s) + " s";
+}
+
+int progress_percent(double progress)
+{
+    if (!std::isfinite(progress))
+        return 0;
+    return clamp_int(progress * 100., 0, 100);
 }
 
 std::string mask_token(const std::string& token)

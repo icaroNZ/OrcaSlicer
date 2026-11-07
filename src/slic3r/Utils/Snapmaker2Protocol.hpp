@@ -54,6 +54,7 @@ enum class Reply {
     BadRequest,      // 400: no token sent
     Busy,            // 403: another client is waiting for approval / connected
     Conflict,        // 409: wrong file type for the mounted toolhead, or start_print refused
+    GatewayTimeout,  // 504: the touchscreen gave up waiting for the controller (pause/resume/stop, 30 s)
     HttpError,       // any other HTTP status
     NetworkError,    // no HTTP status at all (timeout, refused, DNS)
 };
@@ -214,18 +215,158 @@ const char* save_result_name(SaveResult result);
 // Form fields for api/v1/execute_code: token and the first line of `code` only (the touchscreen ignores the rest).
 std::vector<std::pair<std::string, std::string>> execute_code_fields(const std::string& token, const std::string& code);
 
-// Progress values from an api/v1/status body.
+// Values from an api/v1/status body (touchscreen MainRequestHandler.getStatus). Used for the levelling progress and
+// by the monitor panel.
 struct StatusSnapshot
 {
     bool        valid { false }; // JSON object
-    std::string status;          // "IDLE" / "RUNNING" / "PAUSED" (upper case), empty if missing
+    std::string status;          // "IDLE" / "RUNNING" / "PAUSED" (upper case), empty if missing: the controller state
+    std::string print_status;    // "Idle" / "Printing" / "Paused" / "Complete" as sent: the touchscreen's job state
+    std::string tool_head;       // deprecated "toolHead" key, e.g. "TOOLHEAD_3DPRINTING_1", "unplugged"
     bool        has_bed { false };
     double      bed_c { 0. };
     double      bed_target_c { 0. };
     bool        has_z { false };
     double      z { 0. };
+    // Nozzles: single head "nozzleTemperature"/"nozzleTargetTemperature" (1), dual head "nozzleTemperature1/2" and
+    // "nozzleTargetTemperature1/2" (2). 0 for laser / CNC / unplugged.
+    int         nozzles { 0 };
+    double      nozzle_c[2] { 0., 0. };
+    double      nozzle_target_c[2] { 0., 0. };
+    // "workSpeed" is the controller's current feed rate (mm/min, already scaled by the override), NOT the override %.
+    bool        has_feed_rate { false };
+    double      feed_rate { 0. };
+    // Job block, only sent while the touchscreen's job state is printing/paused (isStatePrinting).
+    bool        has_job { false };
+    std::string file_name;
+    double      progress { 0. };      // 0..1
+    double      elapsed_s { 0. };     // "elapsedTime", tick counter (seconds)
+    double      remaining_s { 0. };   // "remainingTime", the touchscreen's own blend of elapsed and estimate
+    double      estimated_s { 0. };   // "estimatedTime" from the file header
+    double      current_line { 0. };
+    double      total_lines { 0. };
+    // Flags and add-on modules.
+    bool        filament_out { false };
+    bool        emergency_stopped { false };
+    bool        enclosure_module { false }; // moduleList.enclosure
+    bool        purifier_module { false };  // moduleList.airPurifier
+    bool        has_door { false };
+    bool        door_open { false };
+    bool        has_purifier_state { false };
+    bool        purifier_on { false };
+    int         purifier_fan_speed { 0 };
 };
 StatusSnapshot parse_status(const std::string& status_body);
+
+// ---------------------------------------------------------------------------------------------------------------
+// Monitor panel (proposal O1, src/slic3r/GUI/Snapmaker2MonitorPanel.cpp). Touchscreen routes used (MainRequestHandler.java,
+// every one a form POST with token=<t>; none goes through execute_code, which is refused while a job runs):
+//   pause_print / resume_print / stop_print       -> 200 {code:0}, 409 {code:n}; the reply waits for the controller
+//                                                    (504 after 30 s on our screen build, no limit on stock)
+//   override_nozzle_temperature           nozzleTemp=<C>                            single extruder
+//   override_nozzle_temperature_by_index  extruderTemperature=<C>&extruderIndex=<0|1>  dual extruder
+//   override_bed_temperature              heatedBedTemp=<C>
+//   override_z_offset                     zOffset=<mm>  ABSOLUTE live Z offset (OnAirGcodeModifier keeps the value,
+//                                         the controller moves by new - old, BedLevelService::UpdateLiveZOffset), range
+//                                         -0.5..2.0 mm, an unchanged value is ignored; reset to 0 when a job starts
+//   override_work_speed                   workSpeed=<%>  feed-rate percentage, controller accepts 1..500, reset to 100 per job
+//   enclosure                             led=<0..100> | fan=<0..100>   (Luban toggles 0 / 100)
+//   air_purifier_switch                   switch=true|false
+//   air_purifier_fan_speed                fan_speed=<1..3>
+// Nozzle, bed and Z offset answer 409 "Wrong head type." without a 3D printing head. Idle, the nozzle and bed routes send
+// M104 / M140 directly, so the panel offers temperature overrides only while a job is running or paused.
+// There is no route that reads the live Z offset or the override percentages back.
+
+constexpr int    MONITOR_NOZZLE_MAX_C      = 275;  // controller caps targets at MAXTEMP - 15: T0 290 - 15, T1 275 - 15 = 260
+constexpr int    MONITOR_BED_MAX_C         = 110;  // A250 bed, same limit as the levelling contract (controller < 130)
+constexpr double MONITOR_Z_OFFSET_MIN_MM   = -0.5; // LIVE_Z_OFFSET_MIN, bed_level.h
+constexpr double MONITOR_Z_OFFSET_MAX_MM   = 2.0;  // LIVE_Z_OFFSET_MAX
+constexpr double MONITOR_Z_OFFSET_STEP_MM  = 0.05;
+constexpr int    MONITOR_WORK_SPEED_MIN    = 10;   // controller accepts > 0.9999; a lower floor keeps a mis-typed 0/1 away
+constexpr int    MONITOR_WORK_SPEED_MAX    = 500;
+constexpr int    MONITOR_WORK_SPEED_DEFAULT = 100;
+constexpr int    MONITOR_PURIFIER_LEVEL_MIN = 1;   // Luban SPEED_LOW .. SPEED_HIGH
+constexpr int    MONITOR_PURIFIER_LEVEL_MAX = 3;
+// The touchscreen drops a session 5 s after its last request; past this without a good poll the session is gone.
+constexpr long   MONITOR_LINK_LOST_MS      = 6000;
+// Disconnect after this long without a click in the panel (app config [snapmaker2_monitor] idle_disconnect_min, 0 = never).
+constexpr int    MONITOR_IDLE_DISCONNECT_MIN_DEFAULT = 10;
+
+// One request for the monitor panel: path for make_url() plus the form fields (token first).
+struct Command
+{
+    std::string                                      path;
+    std::vector<std::pair<std::string, std::string>> fields;
+    std::string                                      what; // for the log, e.g. "bed temperature 60 C"
+    bool        valid() const { return !path.empty(); }
+};
+
+Command pause_command(const std::string& token);
+Command resume_command(const std::string& token);
+Command stop_command(const std::string& token);
+// Clamped to 0..MONITOR_NOZZLE_MAX_C, whole degrees. `nozzle_count` >= 2 (dual head) uses the by-index route; an index
+// outside 0..nozzle_count-1 gives an invalid command.
+Command nozzle_temperature_command(const std::string& token, int index, int nozzle_count, double temp_c);
+Command bed_temperature_command(const std::string& token, double temp_c);    // 0..MONITOR_BED_MAX_C
+Command z_offset_command(const std::string& token, double absolute_mm);      // clamped to the live Z offset range
+Command work_speed_command(const std::string& token, int percent);           // MONITOR_WORK_SPEED_MIN..MAX
+Command enclosure_light_command(const std::string& token, bool on);          // led=100 / led=0
+Command enclosure_fan_command(const std::string& token, bool on);            // fan=100 / fan=0
+Command purifier_switch_command(const std::string& token, bool on);          // switch=true / switch=false
+Command purifier_fan_speed_command(const std::string& token, int level);     // 1..3
+
+// Live Z offset after one +/- click: `current` + `step`, rounded to 0.01 mm and clamped to the controller's range.
+double next_z_offset(double current_mm, double step_mm);
+
+// What the panel shows as the job state.
+enum class MonitorState {
+    Unknown,  // no (valid) status yet
+    Idle,
+    Printing, // status RUNNING
+    Paused,   // status PAUSED
+    Finished, // status IDLE and printStatus "Complete"
+};
+MonitorState monitor_state(const StatusSnapshot& snapshot);
+const char*  monitor_state_name(MonitorState state);
+
+// Which controls the panel enables. Everything is off while a command is in flight, for a read-only session
+// (connect "readonly": stock screens always say false) and without a valid status.
+struct MonitorControls
+{
+    bool pause { false };
+    bool resume { false };
+    bool stop { false };
+    bool nozzle { false };     // temperature overrides: job running or paused and a 3D printing head
+    bool bed { false };
+    bool z_offset { false };
+    bool work_speed { false }; // job running or paused
+    bool enclosure { false };  // enclosure present (connect hasEnclosure or moduleList.enclosure)
+    bool purifier { false };   // moduleList.airPurifier
+    int  nozzle_count { 1 };
+};
+MonitorControls monitor_controls(const StatusSnapshot& snapshot, const ConnectInfo& info, bool command_running);
+
+// A new job started between two status snapshots: the touchscreen then resets its Z offset (0) and speed (100 %)
+// overrides, so the panel resets what it last sent.
+bool job_changed(const StatusSnapshot& previous, const StatusSnapshot& current);
+
+enum class LinkState {
+    Ok,      // last keep-alive poll answered 200
+    Waiting, // no good poll for a moment (or none yet), still inside the touchscreen's 5 s window
+    Lost,    // 401 (the touchscreen ended the session: expired, an upload's disconnect, or another client) or no good
+             // poll for MONITOR_LINK_LOST_MS. The panel stops and waits for the user's Connect: never reconnect on its own,
+             // that would take the touchscreen back from Luban.
+};
+LinkState   link_state(unsigned last_http, long ms_since_last_ok);
+const char* link_state_name(LinkState state);
+
+// True when the panel should disconnect after `idle_s` seconds without a click; `limit_min` <= 0 never disconnects.
+bool idle_disconnect_due(long idle_s, int limit_min);
+
+// "1 h 05 min", "12 min 30 s", "45 s"; "-" for a negative or non-finite value.
+std::string format_duration(double seconds);
+// 0..100, rounded; 0 for a non-finite value.
+int progress_percent(double progress);
 
 // Logging helpers: never log a full token, and keep error bodies short.
 std::string mask_token(const std::string& token);

@@ -57,6 +57,8 @@ TEST_CASE("HTTP statuses map to touchscreen session states", "[Snapmaker2]")
     CHECK(classify(403) == Reply::Busy);            // connect: someone else is trying to connect
     CHECK(classify(409) == Reply::Conflict);        // prepare_print wrong type / start_print refused
     CHECK(classify(500) == Reply::HttpError);
+    CHECK(classify(504) == Reply::GatewayTimeout);  // pause/resume/stop: no controller reply within 30 s
+    CHECK(std::string(reply_name(Reply::GatewayTimeout)) == "gateway-timeout");
     CHECK(classify(0) == Reply::NetworkError);
     CHECK(std::string(reply_name(Reply::PendingApproval)) == "pending-approval");
 }
@@ -416,4 +418,342 @@ TEST_CASE("card-step jog asks once before going below -2 mm", "[Snapmaker2][leve
     }
     CHECK(prompts == 0);
     CHECK(jog_needs_confirmation(total, -0.05));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Monitor panel (proposal O1). Status bodies below are built from the keys MainRequestHandler.getStatus writes
+// (Snapmaker-SM2-Screen-App fabscreen-legacy, V1.19.3 source); no capture from a real touchscreen exists yet.
+
+namespace {
+const char* STATUS_SINGLE_PRINTING =
+    R"({"status":"RUNNING","x":100.2,"y":80,"z":1.6,"homed":true,"offsetX":0,"offsetY":0,"offsetZ":0,)"
+    R"("toolHead":"TOOLHEAD_3DPRINTING_1","nozzleTemperature":209.6,"nozzleTargetTemperature":210,)"
+    R"("heatedBedTemperature":59.9,"heatedBedTargetTemperature":60,"isFilamentOut":false,"workSpeed":3600,)"
+    R"("printStatus":"Printing","fileName":"benchy.gcode","totalLines":182733,"estimatedTime":5400,)"
+    R"("currentLine":45000,"progress":0.2463,"elapsedTime":1322,"remainingTime":4100,)"
+    R"("moduleList":{"enclosure":true,"rotaryModule":false,"emergencyStopButton":true,"airPurifier":false},)"
+    R"("isEnclosureDoorOpen":false,"doorSwitchCount":0})";
+const char* STATUS_DUAL_PAUSED =
+    R"({"status":"PAUSED","x":0,"y":0,"z":20,"homed":true,"toolHead":"TOOLHEAD_3DPRINTING_1",)"
+    R"("nozzleTemperature1":205,"nozzleTargetTemperature1":205,"nozzleTemperature2":180.5,"nozzleTargetTemperature2":0,)"
+    R"("heatedBedTemperature":60,"heatedBedTargetTemperature":60,"isFilamentOut":true,"workSpeed":0,)"
+    R"("printStatus":"Paused","fileName":"two colour.gcode","totalLines":1000,"estimatedTime":600,)"
+    R"("currentLine":500,"progress":0.5,"elapsedTime":300,"remainingTime":225,)"
+    R"("moduleList":{"enclosure":false,"rotaryModule":false,"emergencyStopButton":false,"airPurifier":true},)"
+    R"("airPurifierSwitch":true,"airPurifierFanSpeed":2,"airPurifierFilterHealth":80})";
+const char* STATUS_SINGLE_IDLE =
+    R"({"status":"IDLE","x":0,"y":0,"z":0,"homed":false,"toolHead":"TOOLHEAD_3DPRINTING_1","nozzleTemperature":24,)"
+    R"("nozzleTargetTemperature":0,"heatedBedTemperature":23,"heatedBedTargetTemperature":0,"isFilamentOut":false,)"
+    R"("workSpeed":0,"printStatus":"Idle","moduleList":{"enclosure":false,"rotaryModule":false,"emergencyStopButton":false,"airPurifier":false}})";
+const char* STATUS_COMPLETE =
+    R"({"status":"IDLE","z":120,"toolHead":"TOOLHEAD_3DPRINTING_1","nozzleTemperature":80,"nozzleTargetTemperature":0,)"
+    R"("heatedBedTemperature":50,"heatedBedTargetTemperature":0,"workSpeed":0,"printStatus":"Complete","moduleList":{}})";
+const char* STATUS_LASER =
+    R"({"status":"RUNNING","z":20,"toolHead":"TOOLHEAD_LASER_2","laserFocalLength":20,"laserPower":30,"laserCamera":false,)"
+    R"("workSpeed":1500,"printStatus":"Printing","fileName":"cut.nc","progress":0.1,"elapsedTime":60,"remainingTime":540,)"
+    R"("isEmergencyStopped":true,"moduleList":{"enclosure":true,"airPurifier":true}})";
+
+ConnectInfo connect_info(int head_type, bool enclosure = false, bool readonly = false)
+{
+    ConnectInfo info;
+    info.valid         = true;
+    info.token         = "tok";
+    info.head_type     = head_type;
+    info.has_enclosure = enclosure;
+    info.readonly      = readonly;
+    return info;
+}
+
+std::string field(const Command& c, const std::string& key)
+{
+    for (const auto& f : c.fields)
+        if (f.first == key)
+            return f.second;
+    return "<missing>";
+}
+} // namespace
+
+TEST_CASE("monitor status: single extruder printing", "[Snapmaker2][monitor]")
+{
+    const auto s = parse_status(STATUS_SINGLE_PRINTING);
+    REQUIRE(s.valid);
+    CHECK(s.status == "RUNNING");
+    CHECK(s.print_status == "Printing");
+    CHECK(s.tool_head == "TOOLHEAD_3DPRINTING_1");
+    CHECK(s.nozzles == 1);
+    CHECK(s.nozzle_c[0] == Approx(209.6));
+    CHECK(s.nozzle_target_c[0] == 210.);
+    CHECK(s.bed_target_c == 60.);
+    CHECK(s.has_feed_rate);
+    CHECK(s.feed_rate == 3600.);
+    REQUIRE(s.has_job);
+    CHECK(s.file_name == "benchy.gcode");
+    CHECK(s.progress == Approx(0.2463));
+    CHECK(s.elapsed_s == 1322.);
+    CHECK(s.remaining_s == 4100.);
+    CHECK(s.estimated_s == 5400.);
+    CHECK(s.current_line == 45000.);
+    CHECK(s.total_lines == 182733.);
+    CHECK_FALSE(s.filament_out);
+    CHECK(s.enclosure_module);
+    CHECK_FALSE(s.purifier_module);
+    CHECK(s.has_door);
+    CHECK_FALSE(s.door_open);
+    CHECK_FALSE(s.has_purifier_state);
+    CHECK_FALSE(s.emergency_stopped);
+    CHECK(monitor_state(s) == MonitorState::Printing);
+}
+
+TEST_CASE("monitor status: dual extruder paused, purifier, filament out", "[Snapmaker2][monitor]")
+{
+    const auto s = parse_status(STATUS_DUAL_PAUSED);
+    REQUIRE(s.valid);
+    CHECK(s.nozzles == 2);
+    CHECK(s.nozzle_c[0] == 205.);
+    CHECK(s.nozzle_c[1] == Approx(180.5));
+    CHECK(s.nozzle_target_c[1] == 0.);
+    CHECK(s.filament_out);
+    CHECK(s.purifier_module);
+    CHECK(s.has_purifier_state);
+    CHECK(s.purifier_on);
+    CHECK(s.purifier_fan_speed == 2);
+    CHECK_FALSE(s.has_door);
+    CHECK(s.file_name == "two colour.gcode");
+    CHECK(monitor_state(s) == MonitorState::Paused);
+}
+
+TEST_CASE("monitor status: idle, complete, laser and garbage", "[Snapmaker2][monitor]")
+{
+    const auto idle = parse_status(STATUS_SINGLE_IDLE);
+    CHECK(idle.valid);
+    CHECK_FALSE(idle.has_job); // no job block while the touchscreen is not printing
+    CHECK(idle.file_name.empty());
+    CHECK(monitor_state(idle) == MonitorState::Idle);
+
+    const auto done = parse_status(STATUS_COMPLETE);
+    CHECK(monitor_state(done) == MonitorState::Finished);
+    CHECK(std::string(monitor_state_name(MonitorState::Finished)) == "finished");
+
+    const auto laser = parse_status(STATUS_LASER);
+    CHECK(laser.nozzles == 0);
+    CHECK_FALSE(laser.has_bed);
+    CHECK(laser.has_job);
+    CHECK(laser.emergency_stopped);
+    CHECK(monitor_state(laser) == MonitorState::Printing);
+
+    // Progress outside 0..1 is clamped like the touchscreen does.
+    CHECK(parse_status(R"({"status":"RUNNING","progress":1.7})").progress == 1.);
+    CHECK(parse_status(R"({"status":"RUNNING","progress":-0.2})").progress == 0.);
+
+    CHECK(monitor_state(parse_status("")) == MonitorState::Unknown);
+    CHECK(monitor_state(parse_status("Machine is not connected yet.")) == MonitorState::Unknown);
+    CHECK(monitor_state(parse_status(R"({"x":1})")) == MonitorState::Unknown);
+}
+
+TEST_CASE("monitor commands use the touchscreen's parameter names", "[Snapmaker2][monitor]")
+{
+    for (const Command& c : { pause_command("tok"), resume_command("tok"), stop_command("tok") }) {
+        REQUIRE(c.fields.size() == 1);
+        CHECK(c.fields[0] == std::make_pair(std::string("token"), std::string("tok")));
+    }
+    CHECK(pause_command("t").path == "api/v1/pause_print");
+    CHECK(resume_command("t").path == "api/v1/resume_print");
+    CHECK(stop_command("t").path == "api/v1/stop_print");
+
+    const Command single = nozzle_temperature_command("tok", 0, 1, 215.4);
+    CHECK(single.path == "api/v1/override_nozzle_temperature");
+    CHECK(field(single, "token") == "tok");
+    CHECK(field(single, "nozzleTemp") == "215");
+    CHECK(form_body(single.fields) == "token=tok&nozzleTemp=215");
+
+    const Command dual = nozzle_temperature_command("tok", 1, 2, 199.6);
+    CHECK(dual.path == "api/v1/override_nozzle_temperature_by_index");
+    CHECK(field(dual, "extruderTemperature") == "200");
+    CHECK(field(dual, "extruderIndex") == "1");
+    CHECK_FALSE(nozzle_temperature_command("tok", 1, 1, 200).valid()); // no second nozzle on the single head
+    CHECK_FALSE(nozzle_temperature_command("tok", -1, 2, 200).valid());
+    CHECK(nozzle_temperature_command("tok", 0, 0, 200).valid());       // unknown count -> single route
+    CHECK(nozzle_temperature_command("tok", 0, 0, 200).path == "api/v1/override_nozzle_temperature");
+
+    const Command bed = bed_temperature_command("tok", 65);
+    CHECK(bed.path == "api/v1/override_bed_temperature");
+    CHECK(field(bed, "heatedBedTemp") == "65");
+
+    const Command z = z_offset_command("tok", -0.05);
+    CHECK(z.path == "api/v1/override_z_offset");
+    CHECK(field(z, "zOffset") == "-0.05");
+    CHECK(form_body(z.fields) == "token=tok&zOffset=-0.05");
+    CHECK(field(z_offset_command("tok", 0.1), "zOffset") == "0.1"); // never a '+'
+
+    const Command speed = work_speed_command("tok", 120);
+    CHECK(speed.path == "api/v1/override_work_speed");
+    CHECK(field(speed, "workSpeed") == "120");
+
+    CHECK(enclosure_light_command("tok", true).path == "api/v1/enclosure");
+    CHECK(field(enclosure_light_command("tok", true), "led") == "100");
+    CHECK(field(enclosure_light_command("tok", false), "led") == "0");
+    CHECK(field(enclosure_fan_command("tok", true), "fan") == "100");
+    CHECK(field(enclosure_fan_command("tok", true), "led") == "<missing>"); // one setting per request
+    CHECK(purifier_switch_command("tok", true).path == "api/v1/air_purifier_switch");
+    CHECK(field(purifier_switch_command("tok", true), "switch") == "true");
+    CHECK(field(purifier_switch_command("tok", false), "switch") == "false");
+    CHECK(purifier_fan_speed_command("tok", 2).path == "api/v1/air_purifier_fan_speed");
+    CHECK(field(purifier_fan_speed_command("tok", 2), "fan_speed") == "2");
+    CHECK_FALSE(single.what.empty());
+}
+
+TEST_CASE("monitor commands clamp to the controller's limits", "[Snapmaker2][monitor]")
+{
+    CHECK(field(nozzle_temperature_command("t", 0, 1, 400), "nozzleTemp") == "275");
+    CHECK(field(nozzle_temperature_command("t", 0, 1, -20), "nozzleTemp") == "0");
+    CHECK(field(nozzle_temperature_command("t", 0, 1, std::nan("")), "nozzleTemp") == "0");
+    CHECK(field(bed_temperature_command("t", 150), "heatedBedTemp") == "110");
+    CHECK(field(bed_temperature_command("t", -1), "heatedBedTemp") == "0");
+    CHECK(field(z_offset_command("t", 5), "zOffset") == "2");
+    CHECK(field(z_offset_command("t", -3), "zOffset") == "-0.5");
+    CHECK(field(z_offset_command("t", std::nan("")), "zOffset") == "0");
+    CHECK(field(work_speed_command("t", 0), "workSpeed") == "10");
+    CHECK(field(work_speed_command("t", 900), "workSpeed") == "500");
+    CHECK(field(purifier_fan_speed_command("t", 0), "fan_speed") == "1");
+    CHECK(field(purifier_fan_speed_command("t", 9), "fan_speed") == "3");
+}
+
+TEST_CASE("monitor Z offset is absolute and accumulates per click", "[Snapmaker2][monitor]")
+{
+    // The touchscreen and the controller treat zOffset as the new absolute live offset (an unchanged value is ignored),
+    // so two "+0.05" clicks must send 0.05 then 0.1, and "+" then "-" must return to 0.
+    double z = 0.;
+    z = next_z_offset(z, 0.05);
+    CHECK(field(z_offset_command("t", z), "zOffset") == "0.05");
+    z = next_z_offset(z, 0.05);
+    CHECK(field(z_offset_command("t", z), "zOffset") == "0.1");
+    z = next_z_offset(z, -0.05);
+    z = next_z_offset(z, -0.05);
+    CHECK(z == 0.);
+    CHECK(field(z_offset_command("t", z), "zOffset") == "0");
+    CHECK_FALSE(std::signbit(next_z_offset(0.05, -0.05)));
+    // Twenty clicks of 0.05 do not drift (rounded to 0.01 mm each time).
+    z = 0.;
+    for (int i = 0; i < 20; ++i)
+        z = next_z_offset(z, 0.05);
+    CHECK(field(z_offset_command("t", z), "zOffset") == "1");
+    // Clamped at the controller's range: a click past the limit leaves the value unchanged.
+    CHECK(next_z_offset(1.98, 0.05) == 2.);
+    CHECK(next_z_offset(2., 0.05) == 2.);
+    CHECK(next_z_offset(-0.5, -0.05) == -0.5);
+    CHECK(next_z_offset(std::nan(""), 0.05) == Approx(0.05));
+}
+
+TEST_CASE("monitor controls follow the job state and the session", "[Snapmaker2][monitor]")
+{
+    const auto printing = parse_status(STATUS_SINGLE_PRINTING);
+    auto       c        = monitor_controls(printing, connect_info(1, true), false);
+    CHECK(c.pause);
+    CHECK_FALSE(c.resume);
+    CHECK(c.stop);
+    CHECK(c.nozzle);
+    CHECK(c.bed);
+    CHECK(c.z_offset);
+    CHECK(c.work_speed);
+    CHECK(c.enclosure);
+    CHECK_FALSE(c.purifier);
+    CHECK(c.nozzle_count == 1);
+
+    const auto paused = parse_status(STATUS_DUAL_PAUSED);
+    c = monitor_controls(paused, connect_info(5), false);
+    CHECK_FALSE(c.pause);
+    CHECK(c.resume);
+    CHECK(c.stop);
+    CHECK(c.nozzle);
+    CHECK(c.nozzle_count == 2);
+    CHECK_FALSE(c.enclosure);
+    CHECK(c.purifier);
+
+    // Idle: no job controls and no temperature overrides (idle they would send M104 / M140 straight away).
+    c = monitor_controls(parse_status(STATUS_SINGLE_IDLE), connect_info(1), false);
+    CHECK_FALSE(c.pause);
+    CHECK_FALSE(c.resume);
+    CHECK_FALSE(c.stop);
+    CHECK_FALSE(c.nozzle);
+    CHECK_FALSE(c.bed);
+    CHECK_FALSE(c.z_offset);
+    CHECK_FALSE(c.work_speed);
+    CHECK_FALSE(monitor_controls(parse_status(STATUS_COMPLETE), connect_info(1), false).stop);
+
+    // Laser job: pause/stop/speed yes, no FDM overrides; enclosure from the module list.
+    c = monitor_controls(parse_status(STATUS_LASER), connect_info(4), false);
+    CHECK(c.pause);
+    CHECK(c.stop);
+    CHECK(c.work_speed);
+    CHECK_FALSE(c.nozzle);
+    CHECK_FALSE(c.z_offset);
+    CHECK(c.enclosure);
+    CHECK(c.purifier);
+
+    // Nothing while a command runs, for a read-only session, or without a status.
+    for (const MonitorControls& off : { monitor_controls(printing, connect_info(1, true), true),
+                                        monitor_controls(printing, connect_info(1, true, true), false),
+                                        monitor_controls(parse_status(""), connect_info(1, true), false) }) {
+        CHECK_FALSE(off.pause);
+        CHECK_FALSE(off.stop);
+        CHECK_FALSE(off.nozzle);
+        CHECK_FALSE(off.work_speed);
+        CHECK_FALSE(off.enclosure);
+        CHECK_FALSE(off.purifier);
+    }
+}
+
+TEST_CASE("monitor notices a new job", "[Snapmaker2][monitor]")
+{
+    const auto idle     = parse_status(STATUS_SINGLE_IDLE);
+    const auto printing = parse_status(STATUS_SINGLE_PRINTING);
+    CHECK(job_changed(idle, printing));
+    CHECK_FALSE(job_changed(printing, printing));
+    CHECK_FALSE(job_changed(printing, idle));
+    auto other = printing;
+    other.file_name = "other.gcode";
+    CHECK(job_changed(printing, other));
+    auto again = printing;
+    again.elapsed_s = 3; // same file started again: the tick counter restarted
+    CHECK(job_changed(printing, again));
+    auto jitter = printing;
+    jitter.elapsed_s = printing.elapsed_s - 2;
+    CHECK_FALSE(job_changed(printing, jitter));
+}
+
+TEST_CASE("monitor session link and idle disconnect", "[Snapmaker2][monitor]")
+{
+    CHECK(link_state(200, 0) == LinkState::Ok);
+    CHECK(link_state(200, 1500) == LinkState::Ok);
+    CHECK(link_state(0, 0) == LinkState::Waiting);     // before the first poll
+    CHECK(link_state(0, 3000) == LinkState::Waiting);  // one timed-out poll
+    CHECK(link_state(500, 4000) == LinkState::Waiting);
+    CHECK(link_state(0, MONITOR_LINK_LOST_MS) == LinkState::Lost);
+    CHECK(link_state(200, MONITOR_LINK_LOST_MS) == LinkState::Lost); // stale 200
+    // 401: the touchscreen ended the session (expired, an upload's disconnect, another client). Never "Waiting":
+    // the panel must not keep polling and must not reconnect by itself.
+    CHECK(link_state(401, 0) == LinkState::Lost);
+    CHECK(std::string(link_state_name(LinkState::Lost)) == "lost");
+
+    CHECK_FALSE(idle_disconnect_due(599, 10));
+    CHECK(idle_disconnect_due(600, 10));
+    CHECK_FALSE(idle_disconnect_due(100000, 0));
+    CHECK_FALSE(idle_disconnect_due(100000, -1));
+    CHECK(MONITOR_IDLE_DISCONNECT_MIN_DEFAULT > 0);
+}
+
+TEST_CASE("monitor time and progress text", "[Snapmaker2][monitor]")
+{
+    CHECK(format_duration(0) == "0 s");
+    CHECK(format_duration(45) == "45 s");
+    CHECK(format_duration(750) == "12 min 30 s");
+    CHECK(format_duration(3900) == "1 h 05 min");
+    CHECK(format_duration(36000 + 59) == "10 h 00 min");
+    CHECK(format_duration(-1) == "-");
+    CHECK(format_duration(std::nan("")) == "-");
+    CHECK(progress_percent(0.2463) == 25);
+    CHECK(progress_percent(0.) == 0);
+    CHECK(progress_percent(1.) == 100);
+    CHECK(progress_percent(1.5) == 100);
+    CHECK(progress_percent(std::nan("")) == 0);
 }
