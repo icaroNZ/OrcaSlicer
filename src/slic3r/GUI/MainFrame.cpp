@@ -1211,6 +1211,8 @@ void MainFrame::init_tabpanel() {
             if (m_printer_view) {
                 wxWebView* printer_webview = m_printer_view->get_browser();
                 wxGetApp().page_state_notify_webview(printer_webview, "inactive");
+                // Snapmaker 2.0 (HTTP) monitor: release the touchscreen session (proposal O1).
+                m_printer_view->on_page_hidden();
             }
         }
 

@@ -30,6 +30,7 @@
 namespace Slic3r {
 namespace GUI {
 
+class Snapmaker2MonitorPanel;
 
 class PrinterWebView : public wxPanel{
 public:
@@ -48,9 +49,15 @@ public:
     bool is_u1_device_page();
     void sendMessage(const std::string& msg);
     wxWebView* get_browser() const { return m_browser; }
+    // The Device tab was left: the Snapmaker 2.0 monitor releases the touchscreen (no-op otherwise).
+    void on_page_hidden();
 
 private:
     void SendAPIKey();
+    // "Snapmaker 2.0 (HTTP)" print host: show the native monitor panel instead of the browser (the touchscreen serves
+    // JSON, not a web page). Returns true when the monitor is shown; otherwise hides it (disconnecting) and returns false.
+    bool show_snapmaker2_monitor(const wxString& url);
+    Snapmaker2MonitorPanel* m_sm2_monitor { nullptr };
 
     wxWebView* m_browser;
     long m_zoomFactor;

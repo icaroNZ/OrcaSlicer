@@ -15,7 +15,10 @@
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include <wx/webview.h>
 #include "slic3r/GUI/SSWCP.hpp"
+#include "slic3r/GUI/Snapmaker2MonitorPanel.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 namespace pt = boost::property_tree;
 
@@ -67,9 +70,46 @@ PrinterWebView::~PrinterWebView()
 }
 
 
+bool PrinterWebView::show_snapmaker2_monitor(const wxString& url)
+{
+    const DynamicPrintConfig& cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const auto* host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
+    // Only for the printer's own address: gateway pages and the local "missing connection" page keep the browser.
+    const bool sm2 = host_type != nullptr && host_type->value == htSnapmaker2 && cfg.has("print_host") &&
+                     !cfg.opt_string("print_host").empty() && !wxGetApp().is_gateway_url(url) &&
+                     url.Find("missing_connection") == wxNOT_FOUND;
+    if (!sm2) {
+        if (m_sm2_monitor != nullptr && m_sm2_monitor->IsShown()) {
+            BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: monitor: Device tab switches to the web view";
+            m_sm2_monitor->disconnect_session("printer changed");
+            m_sm2_monitor->Hide();
+            Layout();
+        }
+        return false;
+    }
+    if (m_sm2_monitor == nullptr) {
+        m_sm2_monitor = new Snapmaker2MonitorPanel(this);
+        GetSizer()->Add(m_sm2_monitor, wxSizerFlags().Expand().Proportion(1));
+    }
+    m_sm2_monitor->set_printer(cfg);
+    m_browser->Hide();
+    m_sm2_monitor->Show();
+    Layout();
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: monitor: Device tab shows the native panel for " << cfg.opt_string("print_host");
+    return true;
+}
+
+void PrinterWebView::on_page_hidden()
+{
+    if (m_sm2_monitor != nullptr)
+        m_sm2_monitor->disconnect_session("Device tab left");
+}
+
 void PrinterWebView::load_url(wxString& url, wxString apikey)
 {
     if (m_browser == nullptr)
+        return;
+    if (show_snapmaker2_monitor(url))
         return;
     m_apikey = apikey;
     BOOST_LOG_TRIVIAL(warning) << "[FLUTTER_FLOW] [webview] [navigation_requested] view=device url=" << url.ToUTF8().data();
