@@ -1,6 +1,7 @@
 #ifndef slic3r_Snapmaker2_hpp_
 #define slic3r_Snapmaker2_hpp_
 
+#include <functional>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -90,8 +91,10 @@ private:
     Response get(const std::string& path, long timeout_s) const;
 
     // connect + wait for approval. On success m_token is a granted token and m_last_status the status body.
-    bool open_session(wxString& msg, Snapmaker2Protocol::ConnectInfo& info, ApprovalUi ui, int approval_timeout_s) const;
-    bool wait_for_approval(wxString& msg, ApprovalUi ui, int approval_timeout_s) const;
+    // `cancelled` (optional) is polled every 100 ms while waiting for approval; returning true ends the wait (REV-SM2-CANCEL).
+    bool open_session(wxString& msg, Snapmaker2Protocol::ConnectInfo& info, ApprovalUi ui, int approval_timeout_s,
+                      const std::function<bool()>& cancelled = {}) const;
+    bool wait_for_approval(wxString& msg, ApprovalUi ui, int approval_timeout_s, const std::function<bool()>& cancelled = {}) const;
     void close_session() const;
 
     std::string log_url(const std::string& path) const;

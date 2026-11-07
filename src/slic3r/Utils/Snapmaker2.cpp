@@ -238,7 +238,8 @@ wxString Snapmaker2::describe_failure(const char* step, const Response& r) const
     }
 }
 
-bool Snapmaker2::open_session(wxString& msg, proto::ConnectInfo& info, ApprovalUi ui, int approval_timeout_s) const
+bool Snapmaker2::open_session(wxString& msg, proto::ConnectInfo& info, ApprovalUi ui, int approval_timeout_s,
+                              const std::function<bool()>& cancelled) const
 {
     m_granted              = false;
     const std::string key  = proto::make_url(m_host, "");
@@ -300,7 +301,7 @@ bool Snapmaker2::open_session(wxString& msg, proto::ConnectInfo& info, ApprovalU
     BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: machine series '" << info.series << "', headType " << info.head_type << " ("
                             << proto::head_type_name(info.head_type) << "), enclosure " << info.has_enclosure;
 
-    if (!wait_for_approval(msg, ui, approval_timeout_s))
+    if (!wait_for_approval(msg, ui, approval_timeout_s, cancelled))
         return false;
 
     m_granted = true;
@@ -308,7 +309,7 @@ bool Snapmaker2::open_session(wxString& msg, proto::ConnectInfo& info, ApprovalU
     return true;
 }
 
-bool Snapmaker2::wait_for_approval(wxString& msg, ApprovalUi ui, int approval_timeout_s) const
+bool Snapmaker2::wait_for_approval(wxString& msg, ApprovalUi ui, int approval_timeout_s, const std::function<bool()>& cancelled) const
 {
     const auto  path     = proto::status_path(m_token);
     const auto  deadline = std::chrono::steady_clock::now() + std::chrono::seconds(approval_timeout_s);
@@ -352,6 +353,11 @@ bool Snapmaker2::wait_for_approval(wxString& msg, ApprovalUi ui, int approval_ti
         for (int slept = 0; slept < proto::POLL_INTERVAL_MS; slept += 100) {
             if (dialog && !dialog->Pulse()) {
                 BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: approval wait cancelled by the user";
+                msg = _L("Cancelled while waiting for approval on the touchscreen.");
+                return false;
+            }
+            if (cancelled && cancelled()) {
+                BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: approval wait cancelled after " << polls << " status poll(s)";
                 msg = _L("Cancelled while waiting for approval on the touchscreen.");
                 return false;
             }
@@ -504,7 +510,24 @@ bool Snapmaker2::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Err
 
     wxString           msg;
     proto::ConnectInfo info;
-    if (!open_session(msg, info, ApprovalUi::Notification, UPLOAD_APPROVAL_TIMEOUT_S)) {
+    // REV-SM2-CANCEL: the upload queue only learns about Cancel (or app shutdown) through progress_fn, which used to be
+    // called only once the file transfer ran; ask it every 100 ms while the touchscreen approval is pending.
+    bool              upload_cancelled = false;
+    const std::string no_buffer;
+    const auto        cancel_probe = [&]() {
+        if (progress_fn && !upload_cancelled)
+            progress_fn(Http::Progress(0, 0, 0, 0, no_buffer), upload_cancelled);
+        return upload_cancelled;
+    };
+    if (!open_session(msg, info, ApprovalUi::Notification, UPLOAD_APPROVAL_TIMEOUT_S, cancel_probe)) {
+        if (upload_cancelled) {
+            // Withdraw the pending request on the touchscreen and tell the queue the job is cancelled (no error dialog).
+            close_session();
+            BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: upload cancelled while waiting for approval, disconnect sent";
+            bool cancel = true;
+            progress_fn(Http::Progress(0, 0, 0, 0, no_buffer), cancel);
+            return false;
+        }
         error_fn(get_test_failed_msg(msg));
         return false;
     }
