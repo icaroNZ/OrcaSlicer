@@ -152,6 +152,18 @@ struct Update
             auto validate_staging = [this](const fs::path &staging) -> bool {
                 if (vendor.empty())
                     return true;
+                // #871: the bundled printers config (resources/printers -> <data>/printers) is installed with vendor "bbl" but is
+                // not a preset bundle, so it has no machine/filament/process folders; checking it failed on every fresh data dir.
+                if (target.filename() == "printers") {
+                    size_t files = 0;
+                    try {
+                        for (fs::recursive_directory_iterator it(staging), end; it != end; ++it)
+                            if (fs::is_regular_file(it->status()))
+                                ++files;
+                    } catch (const std::exception &) {}
+                    BOOST_LOG_TRIVIAL(info) << Slic3r::format("printers config staged for install (%1% files)", files);
+                    return true;
+                }
 
                 const bool has_preset_tree = fs::exists(staging / PRESET_PRINTER_NAME) || fs::exists(staging / PRESET_FILAMENT_NAME) ||
                                              fs::exists(staging / PRESET_PRINT_NAME);
