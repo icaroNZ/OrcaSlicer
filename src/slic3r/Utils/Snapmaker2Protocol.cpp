@@ -296,15 +296,22 @@ std::string soak_abort_reason(const std::string& body)
 
 std::string format_mm(double mm)
 {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.3f", mm);
-    std::string s(buf);
-    while (!s.empty() && s.back() == '0')
-        s.pop_back();
-    if (!s.empty() && s.back() == '.')
-        s.pop_back();
-    if (s == "-0")
-        s = "0";
+    // Locale independent: snprintf("%.3f") follows LC_NUMERIC, which wxLocale sets for the UI language, so a
+    // comma-decimal language produced "G1 Z0,05" and the controller ignored the jog. Format whole micrometres by hand.
+    if (!std::isfinite(mm))
+        return "0";
+    mm = std::max(-1e9, std::min(1e9, mm)); // keep llround in range
+    const long long um = std::llround(mm * 1000.0);
+    if (um == 0)
+        return "0";
+    const unsigned long long abs_um = static_cast<unsigned long long>(um < 0 ? -um : um);
+    std::string s = (um < 0 ? "-" : "") + std::to_string(abs_um / 1000);
+    std::string frac = std::to_string(abs_um % 1000);
+    frac.insert(0, 3 - frac.size(), '0');
+    while (!frac.empty() && frac.back() == '0')
+        frac.pop_back();
+    if (!frac.empty())
+        s += "." + frac;
     return s;
 }
 

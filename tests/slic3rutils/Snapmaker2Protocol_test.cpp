@@ -4,6 +4,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <clocale>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -186,6 +187,11 @@ TEST_CASE("nozzle-zero jog and save lines", "[Snapmaker2][level]")
     CHECK(format_mm(0.5) == "0.5");
     CHECK(format_mm(-0.0001) == "0");
     CHECK(format_mm(1.0) == "1");
+    CHECK(format_mm(12.345) == "12.345");
+    CHECK(format_mm(-1.2) == "-1.2");
+    CHECK(format_mm(0.0004) == "0");
+    CHECK(format_mm(-2.0) == "-2");
+    CHECK(format_mm(std::nan("")) == "0");
 
     const std::vector<std::string> down = jog_z_gcodes(-0.05);
     REQUIRE(down.size() == 3);
@@ -363,4 +369,29 @@ TEST_CASE("G1029 S0 replies", "[Snapmaker2][zoffset]")
     CHECK(classify_save_reply("ok") == SaveResult::Legacy);
     CHECK(std::string(save_result_name(SaveResult::NotAtCentre)) == "not-at-centre");
     CHECK(std::string(save_result_name(SaveResult::Legacy)) == "legacy");
+}
+
+TEST_CASE("jog lines do not follow a comma-decimal LC_NUMERIC", "[Snapmaker2][level][locale]")
+{
+    // GUI_App initialises wxLocale for the UI language (setlocale LC_ALL); snprintf("%.3f") then wrote "0,05".
+    const char* current = std::setlocale(LC_NUMERIC, nullptr);
+    const std::string saved = current != nullptr ? current : "C";
+    const char* comma_locale = nullptr;
+    for (const char* name : {"de_DE.UTF-8", "de_DE", "fr_FR.UTF-8", "pt_BR.UTF-8", "German_Germany.1252"}) {
+        if (std::setlocale(LC_NUMERIC, name) != nullptr) {
+            comma_locale = name;
+            break;
+        }
+    }
+    if (comma_locale == nullptr) {
+        WARN("no comma-decimal locale installed, locale case skipped");
+        return;
+    }
+    INFO("LC_NUMERIC=" << comma_locale);
+    CHECK(format_mm(0.05) == "0.05");
+    CHECK(format_mm(-1.25) == "-1.25");
+    const std::vector<std::string> down = jog_z_gcodes(-0.5);
+    std::setlocale(LC_NUMERIC, saved.c_str());
+    REQUIRE(down.size() == 3);
+    CHECK(down[1] == "G1 Z-0.5 F300");
 }
