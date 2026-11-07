@@ -3121,8 +3121,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // BBS: the single bed temperature value accommodates the highest-temperature filament of the print
         // (max over all used extruders instead of the initial extruder only).
         int bed_temp_single = 0;
-        for (const unsigned int extruder_id : print.extruders(false, true))
+        const std::vector<unsigned int> bed_temp_extruders = print.extruders(false, true);
+        for (const unsigned int extruder_id : bed_temp_extruders)
             bed_temp_single = std::max(bed_temp_single, first_bed_temp_opt->get_at(extruder_id));
+        {
+            // #1073: log which filaments set the bed temperature, and which support-only filaments were ignored
+            // because no support was generated for them.
+            std::string used, ignored;
+            for (const unsigned int extruder_id : bed_temp_extruders)
+                used += (used.empty() ? "" : ",") + std::to_string(extruder_id + 1);
+            for (const unsigned int extruder_id : print.extruders(false, false))
+                if (std::find(bed_temp_extruders.begin(), bed_temp_extruders.end(), extruder_id) == bed_temp_extruders.end())
+                    ignored += (ignored.empty() ? "" : ",") + std::to_string(extruder_id + 1);
+            BOOST_LOG_TRIVIAL(info) << "bed temperature: first layer " << bed_temp_single << " from filaments [" << used
+                                    << "]; support-only filaments without generated support ignored: [" << ignored << "]";
+        }
         this->placeholder_parser().set("bed_temperature_initial_layer_single", new ConfigOptionInt(bed_temp_single));
         this->placeholder_parser().set("bed_temperature_initial_layer_vector", new ConfigOptionString());
         this->placeholder_parser().set("chamber_temperature", new ConfigOptionInts(m_config.chamber_temperature));
