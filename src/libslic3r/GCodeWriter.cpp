@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <boost/log/trivial.hpp>
 #include <GCode/GCodeProcessor.hpp>
 
 #ifdef __APPLE__
@@ -39,6 +40,8 @@ void GCodeWriter::apply_print_config(const PrintConfig &print_config)
     };
     m_max_jerk_z = print_config.machine_max_jerk_z.values.front();
     m_max_jerk_e = print_config.machine_max_jerk_e.values.front();
+    m_max_speed_z = use_mach_limits && !print_config.machine_max_speed_z.values.empty() ? print_config.machine_max_speed_z.values.front() : 0.;
+    m_z_speed_clamp_logged = false;
 }
 
 void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
@@ -670,6 +673,16 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
     double speed = this->config.travel_speed_z.value;
     if (speed == 0.)
         speed = this->active_travel_speed(true);
+    // #970: travel_speed_z defaults to 0 and then falls back to the XY travel speed (e.g. F6000). The Snapmaker 2.0
+    // planner clamps Z to max_feedrate anyway; cap here too so the G-code and the time estimate match machine_max_speed_z.
+    // Spiral lifts are left alone: their F is the helix speed, mostly XY.
+    if (m_max_speed_z > 0. && speed > m_max_speed_z) {
+        if (!m_z_speed_clamp_logged) {
+            BOOST_LOG_TRIVIAL(debug) << "Z travel speed clamped from " << speed << " to machine_max_speed_z " << m_max_speed_z << " mm/s";
+            m_z_speed_clamp_logged = true;
+        }
+        speed = m_max_speed_z;
+    }
 
     GCodeG1Formatter w;
     w.emit_z(z);

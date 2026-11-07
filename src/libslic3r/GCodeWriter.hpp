@@ -142,6 +142,9 @@ public:
     double          m_last_jerk;
     double          m_max_jerk_z;
     double          m_max_jerk_e;
+    // #970: machine_max_speed_z (mm/s) for flavors that honour machine limits, 0 = no cap. Pure Z travels are capped to it.
+    double          m_max_speed_z { 0. };
+    bool            m_z_speed_clamp_logged { false };
     double          m_max_junction_deviation;
 
     unsigned int  m_travel_acceleration;

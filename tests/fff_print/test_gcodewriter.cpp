@@ -104,3 +104,24 @@ SCENARIO("set_speed emits values with fixed-point output.", "[GCodeWriter]") {
         }
     }
 }
+
+TEST_CASE("Z travel speed is capped at machine_max_speed_z (#970)", "[GCodeWriter]")
+{
+    auto z_move = [](GCodeFlavor flavor, double travel_speed_z) {
+        PrintConfig print_config = static_cast<const PrintConfig &>(FullPrintConfig::defaults());
+        print_config.gcode_flavor.value        = flavor;
+        print_config.machine_max_speed_z.values = {40., 40.};
+        print_config.travel_speed_z.value       = travel_speed_z;
+        GCodeWriter writer;
+        writer.apply_print_config(print_config);
+        writer.set_extruders({0});
+        writer.set_extruder(0);
+        return writer.travel_to_z(5., "", true);
+    };
+    // Marlin 2 honours machine limits: 100 mm/s is capped to 40 mm/s (F2400).
+    CHECK(z_move(gcfMarlinFirmware, 100.).find(" F2400") != std::string::npos);
+    // Below the limit the configured speed is kept.
+    CHECK(z_move(gcfMarlinFirmware, 10.).find(" F600") != std::string::npos);
+    // A flavor without machine limits is not capped.
+    CHECK(z_move(gcfSmoothie, 100.).find(" F6000") != std::string::npos);
+}
