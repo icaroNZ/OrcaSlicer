@@ -530,8 +530,15 @@ void Snapmaker2BedLevelDialog::on_mesh_finished(const Snapmaker2::Response& r)
         break;
     case proto::LevelResult::Cancelled: text = _L("The controller cancelled the levelling. The mesh was not changed."); break;
     case proto::LevelResult::ProbeFailed:
+        // Controller abl.cpp auto_probing(): a failed point calls reset_bed_level(), so the mesh in RAM is flat until a restart
+        // reloads the saved one (G1029 A returns without reloading it).
         text = _L("Probing failed. Check that the bed and the probe are clean and that nothing blocks the toolhead, then try again.") +
+               "\n" +
+               _L("The controller reset the bed mesh in its memory. Restart the machine (to load the saved mesh) or run the "
+                  "measurement again before printing.") +
                bed_still_hot(m_params.bed_temp_c);
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: mesh probing failed, controller mesh reset in RAM (restart before printing); reply: "
+                                   << proto::truncate(r.body);
         break;
     case proto::LevelResult::InvalidGrid: text = _L("The controller refused the grid size."); break;
     case proto::LevelResult::TooFast:
@@ -780,8 +787,8 @@ void Snapmaker2BedLevelDialog::on_close_request()
     } else if (m_stage == Stage::Zeroing) {
         const wxString what = m_mode == Mode::ZOffset ?
                                   _L("The Z offset has not been saved. The live Z offset is 0 until the machine restarts.") :
-                                  _L("The nozzle height has not been saved. The new mesh is used only until the machine restarts and the nozzle "
-                                     "height may be wrong.");
+                                  _L("The nozzle height has not been saved. The machine now holds an unfinished mesh in its memory: restart "
+                                     "the machine before printing so that it loads the saved mesh.");
         MessageDialog dlg(this, what + bed_still_hot(m_params.bed_temp_c) + "\n\n" + _L("Close without saving?"),
                           _L("Snapmaker 2.0 bed levelling"), wxICON_WARNING | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
