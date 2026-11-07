@@ -2622,6 +2622,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     m_enable_cooling_markers = true;
     this->apply_print_config(print.config());
+    // #1064: as upstream OrcaSlicer, apply the global object/region settings so region options read below (such as
+    // small_area_infill_flow_compensation) see the user's value instead of the FullPrintConfig default.
+    m_config.apply(print.default_object_config());
+    m_config.apply(print.default_region_config());
 
     // m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
@@ -2637,6 +2641,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     if (m_config.small_area_infill_flow_compensation.value && !m_config.small_area_infill_flow_compensation_model.empty())
         m_small_area_infill_flow_compensator = make_unique<SmallAreaInfillFlowCompensator>(print.config());
+    BOOST_LOG_TRIVIAL(debug) << "small area flow compensation: " << (m_small_area_infill_flow_compensator ? "enabled" : "disabled")
+                             << " (option " << m_config.small_area_infill_flow_compensation.value << ", model lines "
+                             << m_config.small_area_infill_flow_compensation_model.values.size() << ")";
 
     // Orca: Don't output Header block if BTT thumbnail is identified in the list
     // Get the thumbnails value as a string
