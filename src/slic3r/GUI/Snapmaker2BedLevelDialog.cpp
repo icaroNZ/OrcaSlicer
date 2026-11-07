@@ -313,14 +313,18 @@ void Snapmaker2BedLevelDialog::on_timer(wxTimerEvent&)
                                              m_host->last_status_http());
         text += "\n" + _L("To stop the levelling, use the emergency stop button or switch the machine off; "
                           "Snapmaker Orca cannot interrupt a running G-code command.");
+        // Refit only when the number of lines changes, so the dialog does not resize on every tick.
+        const bool refit = m_status->GetLabel().Freq('\n') != text.Freq('\n');
         m_status->SetLabel(text);
         m_status->Wrap(FromDIP(460));
         Layout();
-        Fit();
+        if (refit)
+            Fit();
     } else if (m_stage == Stage::Zeroing) {
         if (snap.has_z)
             m_z_label->SetLabel(GUI::format_wxstr(_L("Nozzle Z: %1% mm"), wxString::Format("%.2f", snap.z)) +
-                                (snap.has_bed ? wxString::Format("   %s %.1f / %.0f °C", _L("Bed:"), snap.bed_c, snap.bed_target_c) :
+                                (snap.has_bed ? "   " + GUI::format_wxstr(_L("Bed: %1% / %2% °C"), wxString::Format("%.1f", snap.bed_c),
+                                                                          wxString::Format("%.0f", snap.bed_target_c)) :
                                                 wxString()));
     }
 }
