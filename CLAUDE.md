@@ -273,6 +273,19 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
   - `81490d1415`: by-object printing retracts and raises Z **before** the tool change (`GCode.cpp:3305-3321`).
   - `1dc3a3c343`, `ae32b2091b`, `d8d9f9321a`: Profiles submodule now uses `https://github.com/icaroNZ/snapmaker-profiles.git`
     on branch `a250t/main`, pinned at `0655774` (bundle `02.03.04.06+a250t`). `scripts/orca_extra_profile_check.py` skips the non-preset rule JSONs.
+  - Later: CI fixes and merge-audit gaps (`../_snapmaker2-review/integration/OrcaSlicer-CI.md`), the SM2 bed levelling dialog
+    (`ccc5c2815b`..`ba78f77ed0`), and the fix pass of 07/11/2026 (`ba78f77ed0..`, listed in `../_snapmaker2-review/issues/OrcaSlicer.md`).
+- **Fix pass 07/11/2026 behaviour changes** (all uncompiled until CI):
+  - A250/A350 G-code (`printer_model` "Snapmaker A250*/A350*") starts with a Luban-style `;Header Start` ... `;Header End` block
+    (`GCode/SnapmakerHeader.hpp`, PR #1105): `file_total_lines` (20 digits, patched by `GCodeProcessor::run_post_process`), estimated time,
+    bounds, temperatures, retraction and one `;thumbnail: data:image/png;base64,...` line. The touchscreen then skips its full-file parse.
+  - Profiles gitlink now `2b71728` (bundle `02.03.04.07+a250t`): Z accel 100, Dual bed `max()` on tool change, flush cap, hot-bed offset at Z1.6.
+  - Cherry-picked PRs: #1150 (final purge lifts), #1074 (bed temp ignores support filament without support), #962 (Add 3MF keeps modifier
+    settings), #1139 (wipe tower categories), #1067 (z_offset after unknown position); hand-port of #1154 (close vetoed while a modal dialog runs).
+  - Pure Z travels are capped at `machine_max_speed_z` for Marlin/Klipper/RRF (`GCodeWriter::_travel_to_z`).
+  - SM2 host: Z jog text is locale independent; the card step locks its controls while a line runs and asks once before going 2 mm
+    below the probed height (app config `[snapmaker2_bed_level] confirm_deep_jog`, default 1); Cancel works during the upload approval wait;
+    the keep-alive polls 1.5 s from the previous request start (3 s timeout) and re-connects once on 401 during an upload.
 - No A250T-specific preset exists (nor A150). The A250T uses the `Snapmaker A250` chain:
   `Snapmaker A250 (0.4 nozzle).json` → `fdm_a250` (230x250 bed, height 230, `PRINTER_MODEL_SNAPMAKER_A250`) → `fdm_linear2`
   → `fdm_common` (`gcode_flavor marlin2`). Dual: `fdm_a250_dual.json` (toolchange `T<n>` + `M109 T<n> S.. C3 W1`).
@@ -288,7 +301,9 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
 - Checks you can run locally (full commands are in the workspace skill `orca-build-test`):
   - SM2 protocol unit test: compile `src/slic3r/Utils/Snapmaker2Protocol.cpp` and `tests/slic3rutils/Snapmaker2Protocol_test.cpp`
     with `clang++ -std=c++17 -Wall -Wextra -Werror` against Catch2 v3.7.1 from `../_snapmaker2-review/integration/tools/catch2-3.7.1/`.
-    Expected result: `All tests passed (215 assertions in 18 test cases)` (the test uses `catch2/catch_approx.hpp`; the local Catch2 copy has a forwarding shim for it).
+    Expected result: `All tests passed (235 assertions in 20 test cases)` (the test uses `catch2/catch_approx.hpp`; the local Catch2 copy has a forwarding shim for it).
+  - SM2 header unit test: `tests/libslic3r/test_snapmaker_header.cpp` only needs `src/libslic3r/GCode/SnapmakerHeader.hpp`; compile it the same way
+    plus a shim dir whose `catch2/generators/catch_generators.hpp` includes `catch_amalgamated.hpp`. Expected: `All tests passed (59 assertions in 4 test cases)`.
   - Host syntax check: `clang++ -std=c++17 -fsyntax-only -I../_snapmaker2-review/integration/tools/orcaslicer-sm2-syntax-stubs -Isrc -isystem deps_src src/slic3r/Utils/Snapmaker2.cpp`.
     Expected: exit 0, with 54 unused-parameter warnings from upstream `PrintHost.hpp`.
   - Profiles: `python3 -I ../snapmaker-profiles/scripts/validate_profiles.py --root submodules/Profiles` should print `PASS (A250/A350 subset)`.
@@ -297,8 +312,10 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
 
 ### Where the Snapmaker 2.0 code is
 - `src/slic3r/Utils/Snapmaker2.{hpp,cpp}`: `PrintHost` subclass.
-  - `open_session` POSTs `api/v1/connect` with `token=<t>`. `wait_for_approval` polls `api/v1/status` every 1.5 s, up to 60 s for Test and 120 s for upload.
-  - The `SessionKeepAlive` thread keeps the session open during uploads, because the touchscreen drops a session after 5 s idle.
+  - `open_session` POSTs `api/v1/connect` with `token=<t>`. `wait_for_approval` polls `api/v1/status` every 1.5 s, up to 60 s for Test and 120 s for upload;
+    upload passes a cancel probe (progress_fn) so the queue's Cancel ends the wait.
+  - The `KeepAlive` thread keeps the session open during uploads and interactive sessions, because the touchscreen drops a session after 5 s idle.
+    It polls every 1.5 s measured from the previous request start (3 s request cap) and logs its longest gap when it stops.
   - `upload` refuses 3MF, a non-3DP head (headType other than 1 or 5) and a RUNNING/PAUSED machine. It then calls `prepare_print` (multipart `token`, `type=3DP`, `file`), optionally `start_print`, and finally `disconnect`.
   - `get_auth_info()` returns the approved token. `PhysicalPrinterDialog.cpp:197-211` stores it in `printhost_apikey`.
 - `src/slic3r/Utils/Snapmaker2Protocol.{hpp,cpp}`: pure helpers with no wx, curl or boost dependency, and the only unit-tested part.
