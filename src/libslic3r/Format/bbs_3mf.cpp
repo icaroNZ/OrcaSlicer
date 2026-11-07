@@ -4546,7 +4546,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         Transform3d transform = bbs_get_transform_from_3mf_specs_string(bbs_get_attribute_value_string(attributes, num_attributes, TRANSFORM_ATTR));
         Vec3d ofs2ass = bbs_get_offset_from_3mf_specs_string(bbs_get_attribute_value_string(attributes, num_attributes, OFFSET_ATTR));
         if (object_id < m_model->objects.size()) {
-            if (instance_id < m_model->objects[object_id]->instances.size()) {
+            if (instance_id < 0 || instance_id >= (int) m_model->objects[object_id]->instances.size()) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ":" << __LINE__ << boost::format("invalid instance id %1%\n") % instance_id;
+            } else {
                 m_model->objects[object_id]->instances[instance_id]->set_assemble_from_transform(transform);
                 m_model->objects[object_id]->instances[instance_id]->set_offset_to_assembly(ofs2ass);
             }
