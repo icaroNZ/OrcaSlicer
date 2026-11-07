@@ -288,7 +288,7 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
 - Checks you can run locally (full commands are in the workspace skill `orca-build-test`):
   - SM2 protocol unit test: compile `src/slic3r/Utils/Snapmaker2Protocol.cpp` and `tests/slic3rutils/Snapmaker2Protocol_test.cpp`
     with `clang++ -std=c++17 -Wall -Wextra -Werror` against Catch2 v3.7.1 from `../_snapmaker2-review/integration/tools/catch2-3.7.1/`.
-    Expected result: `All tests passed (69 assertions in 8 test cases)`.
+    Expected result: `All tests passed (215 assertions in 18 test cases)` (the test uses `catch2/catch_approx.hpp`; the local Catch2 copy has a forwarding shim for it).
   - Host syntax check: `clang++ -std=c++17 -fsyntax-only -I../_snapmaker2-review/integration/tools/orcaslicer-sm2-syntax-stubs -Isrc -isystem deps_src src/slic3r/Utils/Snapmaker2.cpp`.
     Expected: exit 0, with 54 unused-parameter warnings from upstream `PrintHost.hpp`.
   - Profiles: `python3 -I ../snapmaker-profiles/scripts/validate_profiles.py --root submodules/Profiles` should print `PASS (A250/A350 subset)`.
