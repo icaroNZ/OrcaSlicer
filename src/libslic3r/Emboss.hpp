@@ -87,13 +87,14 @@ namespace Emboss
         }
 
         bool operator==(const FontFile &other) const {
-            if (data->size() != other.data->size())
+            if (data->size() != other.data->size() || infos.size() != other.infos.size())
                 return false;
             //if(*data != *other.data) return false;
-            for (size_t i = 0; i < infos.size(); i++) 
+            // #1009: descent/linegap used '==', so two identical fonts never compared equal.
+            for (size_t i = 0; i < infos.size(); i++)
                 if (infos[i].ascent != other.infos[i].ascent ||
-                    infos[i].descent == other.infos[i].descent ||
-                    infos[i].linegap == other.infos[i].linegap)
+                    infos[i].descent != other.infos[i].descent ||
+                    infos[i].linegap != other.infos[i].linegap)
                     return false;
             return true;
         }

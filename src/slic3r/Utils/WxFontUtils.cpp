@@ -313,7 +313,11 @@ std::unique_ptr<Emboss::FontFile> WxFontUtils::set_italic(wxFont &font, const Em
         if (new_font_file == nullptr) continue;
 
         // is still same font file pointer?
-        if (font_file == *new_font_file) continue;
+        if (font_file == *new_font_file) {
+            BOOST_LOG_TRIVIAL(debug) << "emboss: " << font.GetFaceName().ToUTF8().data() << " style " << int(style)
+                                     << " gives the same font file (collection face not resolved, #1009)";
+            continue;
+        }
 
         return new_font_file;
     }
@@ -340,7 +344,11 @@ std::unique_ptr<Emboss::FontFile> WxFontUtils::set_bold(wxFont &font, const Embo
         if (new_font_file == nullptr) continue;
 
         // is still same font file pointer?
-        if (font_file == *new_font_file) continue;
+        if (font_file == *new_font_file) {
+            BOOST_LOG_TRIVIAL(debug) << "emboss: " << font.GetFaceName().ToUTF8().data() << " weight " << int(weight)
+                                     << " gives the same font file (collection face not resolved, #1009)";
+            continue;
+        }
 
         return new_font_file;
     }
