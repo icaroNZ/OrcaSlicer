@@ -7962,6 +7962,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         m_need_change_layer_lift_z = false;
         // Orca: ensure Z matches planned layer height
         if (_last_pos_undefined && !slope_need_z_travel) {
+            BOOST_LOG_TRIVIAL(debug) << "restore Z after unknown pos: nominal " << m_nominal_z << " (last_layer_z " << m_last_layer_z
+                                     << ", z_offset " << m_config.z_offset.value << ")";
             gcode += this->writer().travel_to_z(m_nominal_z, "ensure Z matches planned layer height", true);
         }
     }
