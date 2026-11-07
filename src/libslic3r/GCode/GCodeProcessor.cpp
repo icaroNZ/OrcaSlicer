@@ -4489,8 +4489,10 @@ void GCodeProcessor::run_post_process()
                     for (const Vec3f& position : move.interpolation_points)
                         merge_position(position, move.extruder_id, 0.0);
                 }
-                if (!bounds.defined)
+                if (!bounds.defined) {
+                    BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0 header: no extrusion moves, cannot compute the print bounds";
                     throw Slic3r::ExportError("Cannot determine Snapmaker print bounds.");
+                }
                 for (size_t axis = 0; axis < 3; ++axis) {
                     const std::string suffix = std::string(1, "xyz"[axis]) + "(mm): ";
                     export_lines.append_line(";min_" + suffix + float_to_string_decimal_point(bounds.min[axis], 3) + "\n");
@@ -4791,8 +4793,15 @@ void GCodeProcessor::run_post_process()
 
     export_lines.flush(out, m_result, out_path);
 
-    if (has_snapmaker_header && !SnapmakerHeader::update_line_count(out.f, m_result.lines_ends.size()))
-        throw Slic3r::RuntimeError("GCode processor post process export failed.\nCannot update Snapmaker header.\n");
+    if (has_snapmaker_header) {
+        if (!SnapmakerHeader::update_line_count(out.f, m_result.lines_ends.size())) {
+            BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0 header: cannot write file_total_lines=" << m_result.lines_ends.size() << " into " << out_path;
+            throw Slic3r::RuntimeError("GCode processor post process export failed.\nCannot update Snapmaker header.\n");
+        }
+        BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0 header finalised: file_total_lines=" << m_result.lines_ends.size() << ", estimated_time(s)="
+                                << static_cast<size_t>(m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time + 0.5f)
+                                << ", layers=" << m_layer_id;
+    }
 
     out.close();
     in.close();

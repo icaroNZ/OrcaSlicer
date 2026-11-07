@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "libslic3r/Print.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/GCodeReader.hpp"
@@ -12,6 +13,7 @@
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
+using Catch::Matchers::WithinAbs;
 
 std::regex perimeters_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; perimeter");
 std::regex infill_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; infill");

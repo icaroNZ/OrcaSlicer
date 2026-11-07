@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <iostream>
 #include <numeric>
@@ -2654,7 +2655,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     if (snapmaker_header) {
         file.write(SnapmakerHeader::START);
         file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Snapmaker_Printing_Time_Placeholder).c_str());
-        file.write_format(";layer_height: %.3f\n", print.objects().front()->config().layer_height.value);
+        // Guard the first object: the header is written before the slicing summary that also reads it.
+        const double sm2_layer_height = print.objects().empty() ? m_config.initial_layer_print_height.value :
+                                                                  print.objects().front()->config().layer_height.value;
+        file.write_format(";layer_height: %.3f\n", sm2_layer_height);
         // The SM2 screen scans the entire file unless the header supplies retraction metadata.
         for (size_t extruder_id = 0; extruder_id < std::min(size_t(2), m_config.nozzle_diameter.size()); ++extruder_id) {
             file.write_format(";Extruder %zu Retraction Distance: %.3f\n", extruder_id,
@@ -2665,10 +2669,28 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                               get_value_at(m_config, m_config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament, extruder_id));
         }
         file.write_format(";build_plate_temperature(\xC2\xB0" "C): %d\n", get_bed_temperature_max(print, true));
+        size_t sm2_thumbnail_bytes = 0;
         GCodeThumbnails::export_thumbnails_to_file(
-            thumbnail_cb, print.get_plate_index(), thumbnails, [&file](const char* sz) { file.write(sz); },
+            thumbnail_cb, print.get_plate_index(), thumbnails,
+            [&file, &sm2_thumbnail_bytes](const char* sz) {
+                sm2_thumbnail_bytes += std::strlen(sz);
+                file.write(sz);
+            },
             [&print]() { print.throw_if_canceled(); }, true);
         file.write(";Header End\n\n");
+        if (sm2_thumbnail_bytes == 0)
+            BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0 header: no thumbnail written (thumbnail callback "
+                                       << (thumbnail_cb ? "set" : "missing") << ", " << thumbnails.size()
+                                       << " thumbnail sizes configured); the touchscreen will show no preview";
+        else
+            BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0 header written for '" << print.config().printer_model.value << "': thumbnail "
+                                    << (thumbnails.empty() ? std::string("?") :
+                                                             std::to_string(int(thumbnails.front().second.x())) + "x" +
+                                                                 std::to_string(int(thumbnails.front().second.y())))
+                                    << ", " << sm2_thumbnail_bytes << " bytes (line count is filled in by the G-code processor)";
+    } else if (!is_bbl_printers && boost::starts_with(print.config().printer_model.value, "Snapmaker A")) {
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0 header not written: printer_model '" << print.config().printer_model.value
+                                   << "' is not a known A250/A350 model";
     }
 
     if (!has_BTT_thumbnail) {

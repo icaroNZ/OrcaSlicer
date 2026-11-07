@@ -37,3 +37,21 @@ TEST_CASE("Snapmaker line count updates preserve file size and line offsets", "[
     CHECK(std::stoull(updated.substr(offset, SnapmakerHeader::LINE_COUNT_WIDTH)) == count);
     CHECK(updated.substr(offset + SnapmakerHeader::LINE_COUNT_WIDTH) == original.substr(offset + SnapmakerHeader::LINE_COUNT_WIDTH));
 }
+
+TEST_CASE("Snapmaker 2.0 header covers every shipped A250/A350 printer_model", "[SnapmakerHeader]")
+{
+    // The printer_model values of submodules/Profiles/Snapmaker/machine/*A250*/*A350* (bundle 02.03.04.07+a250t).
+    for (const auto base : {"Snapmaker A250", "Snapmaker A350"})
+        for (const auto suffix : {"", " BKit", " QSKit", " QS+B Kit", " Dual", " Dual BKit", " Dual QSKit", " Dual QS+B Kit"})
+            CHECK(SnapmakerHeader::is_snapmaker_2(std::string(base) + suffix));
+}
+
+TEST_CASE("Snapmaker header template starts with the patched line count", "[SnapmakerHeader]")
+{
+    // update_line_count() seeks to the end of LINE_COUNT_PREFIX, so START must begin with it and hold 20 zeros there.
+    const std::string start  = SnapmakerHeader::START;
+    const std::string prefix = SnapmakerHeader::LINE_COUNT_PREFIX;
+    REQUIRE(start.rfind(prefix, 0) == 0);
+    CHECK(start.substr(prefix.size(), SnapmakerHeader::LINE_COUNT_WIDTH) == std::string(SnapmakerHeader::LINE_COUNT_WIDTH, '0'));
+    CHECK(start.substr(prefix.size() + SnapmakerHeader::LINE_COUNT_WIDTH) == "\n;header_type: 3dp\n");
+}
