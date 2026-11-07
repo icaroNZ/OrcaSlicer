@@ -301,7 +301,7 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
 - Checks you can run locally (full commands are in the workspace skill `orca-build-test`):
   - SM2 protocol unit test: compile `src/slic3r/Utils/Snapmaker2Protocol.cpp` and `tests/slic3rutils/Snapmaker2Protocol_test.cpp`
     with `clang++ -std=c++17 -Wall -Wextra -Werror` against Catch2 v3.7.1 from `../_snapmaker2-review/integration/tools/catch2-3.7.1/`.
-    Expected result: `All tests passed (235 assertions in 20 test cases)` (the test uses `catch2/catch_approx.hpp`; the local Catch2 copy has a forwarding shim for it).
+    Expected result: `All tests passed (435 assertions in 30 test cases)` (08/11/2026, after O1) (the test uses `catch2/catch_approx.hpp`; the local Catch2 copy has a forwarding shim for it).
   - SM2 header unit test: `tests/libslic3r/test_snapmaker_header.cpp` only needs `src/libslic3r/GCode/SnapmakerHeader.hpp`; compile it the same way
     plus a shim dir whose `catch2/generators/catch_generators.hpp` includes `catch_amalgamated.hpp`. Expected: `All tests passed (59 assertions in 4 test cases)`.
   - Host syntax check: `clang++ -std=c++17 -fsyntax-only -I../_snapmaker2-review/integration/tools/orcaslicer-sm2-syntax-stubs -Isrc -isystem deps_src src/slic3r/Utils/Snapmaker2.cpp`.
@@ -319,6 +319,12 @@ Specialist agent: `sm-orca`. Background: `../_snapmaker2-review/repos/OrcaSlicer
   - `upload` refuses 3MF, a non-3DP head (headType other than 1 or 5) and a RUNNING/PAUSED machine. It then calls `prepare_print` (multipart `token`, `type=3DP`, `file`), optionally `start_print`, and finally `disconnect`.
   - `get_auth_info()` returns the approved token. `PhysicalPrinterDialog.cpp:197-211` stores it in `printhost_apikey`.
 - `src/slic3r/Utils/Snapmaker2Protocol.{hpp,cpp}`: pure helpers with no wx, curl or boost dependency, and the only unit-tested part.
+- `src/slic3r/GUI/Snapmaker2MonitorPanel.{hpp,cpp}` (O1, 08/11/2026, uncompiled until CI): Device tab for the SM2 host, shown by
+  `PrinterWebView::show_snapmaker2_monitor` instead of the browser. Connect on click only; disconnects on tab change
+  (`MainFrame` -> `PrinterWebView::on_page_hidden`), printer change, `[snapmaker2_monitor] idle_disconnect_min` (default 10) and hands the
+  session to an upload (`Snapmaker2::upload_in_progress`); never reconnects by itself. Status from the keep-alive body, commands through
+  `Snapmaker2::run_command` on a worker. `override_z_offset` is absolute (Orca sends the sum of its clicks). Stub check:
+  `../_snapmaker2-review/integration/tools/orcaslicer-sm2-syntax-stubs/monitor-panel/check.sh <repo> <scratch>`.
 - Registration: `PrintConfig.hpp:60` (enum), `PrintConfig.cpp:93` (key map), `PrintConfig.cpp:4068-4084` (enum value and label; **the index must equal the enum value**),
   `PrintHost.cpp:74` (factory), `src/slic3r/CMakeLists.txt:670-673` (sources), `tests/slic3rutils/CMakeLists.txt:1-13` (test target, defined before the GUI-only `return()`).
 - Sending to the printer: use the **Plater connection button**, which opens `PhysicalPrinterDialog` (`Plater.cpp:2309-2310`). Then use the **"Print" (send G-code)** action (`eSendGcode`, `MainFrame.cpp:1882`).
