@@ -502,6 +502,19 @@ bool generate_image(const std::string &filename, wxImage &image, wxSize img_size
 
 std::deque<wxDialog*> dialogStack;
 
+// Hand-ported from Snapmaker/OrcaSlicer PR #1154 (macOS invalid free when the main frame closes under a modal loop).
+wxDialog* find_showing_modal_dialog()
+{
+    for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext()) {
+        wxDialog* dlg = dynamic_cast<wxDialog*>(node->GetData());
+        if (dlg != nullptr && dlg->IsModal())
+            return dlg;
+    }
+    return nullptr;
+}
+
+bool any_modal_dialog_showing() { return find_showing_modal_dialog() != nullptr; }
+
 void fit_in_display(wxTopLevelWindow& window, wxSize desired_size)
 {
     const auto display_size = wxDisplay(window.GetParent()).GetClientArea();

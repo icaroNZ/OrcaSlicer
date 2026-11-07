@@ -99,6 +99,11 @@ wxDECLARE_EVENT(EVT_DPI_CHANGED_SLICER, DpiChangedEvent);
 
 extern std::deque<wxDialog*> dialogStack;
 
+// The first modal wxDialog whose loop is running (in dialogStack or not), or nullptr.
+wxDialog* find_showing_modal_dialog();
+// True while any modal wxDialog loop is running, in dialogStack or not.
+bool any_modal_dialog_showing();
+
 template<class P> class DPIAware : public P
 {
 public:

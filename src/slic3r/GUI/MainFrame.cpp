@@ -505,6 +505,18 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "cancelled by gizmo in editing";
             return;
         }
+        // PR #1154: a modal dialog is still running (e.g. Preferences, Snapmaker 2.0 bed levelling, Quit from the Dock):
+        // destroying the main frame now would crash the nested modal loop (macOS invalid free, Sentry SNAPMAKER_ORCA-8BX).
+        if (event.CanVeto()) {
+            if (wxDialog* modal = find_showing_modal_dialog()) {
+                event.Veto();
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": [MODAL-CLOSE] close vetoed: modal dialog '"
+                                           << into_u8(modal->GetTitle()) << "' (" << into_u8(modal->GetClassInfo()->GetClassName())
+                                           << ") is open";
+                modal->Raise();
+                return;
+            }
+        }
 
         //BBS:
         //if (event.CanVeto() && !wxGetApp().check_and_save_current_preset_changes(_L("Application is closing"), _L("Closing Application while some presets are modified."))) {
