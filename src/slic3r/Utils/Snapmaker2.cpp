@@ -467,9 +467,16 @@ Snapmaker2::Response Snapmaker2::execute_code(const std::string& line, long time
     if (r.cancelled)
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: stopped waiting for '" << fields[1].second << "' after " << r.elapsed_s
                                    << " s (cancelled by the user; the machine keeps running it)";
-    else if (r.kind == proto::Reply::Ok)
+    else if (r.kind == proto::Reply::Ok) {
+        // Log the end of the output: a heated G1029 A answers with a temperature line per second of heat-up, and the
+        // lines that say how it ended ("heat soak done", "heat soak aborted: ...", "auto probing fail !") come last.
+        constexpr size_t tail_len = 600;
+        const std::string output  = r.body.size() <= tail_len ?
+                                        r.body :
+                                        "...(" + std::to_string(r.body.size()) + " bytes) " + r.body.substr(r.body.size() - tail_len);
         BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: '" << fields[1].second << "' -> HTTP " << r.status << " after " << r.elapsed_s
-                                << " s, output: '" << proto::truncate(r.body, 600) << "'";
+                                << " s, output: '" << output << "'";
+    }
     else
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: '" << fields[1].second << "' -> HTTP " << r.status << " ("
                                    << proto::reply_name(r.kind) << ") after " << r.elapsed_s << " s, error: '" << r.error

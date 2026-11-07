@@ -47,6 +47,16 @@ wxString mm_ss(long seconds)
     return wxString::Format("%02ld:%02ld", seconds / 60, seconds % 60);
 }
 
+// The controller keeps the bed at the levelling temperature after a heat soak (it switches it off only when the soak
+// itself is aborted), so every way out of the dialog after heating must say so.
+wxString bed_still_hot(int bed_temp_c)
+{
+    return bed_temp_c > 0 ? "\n" + GUI::format_wxstr(_L("The bed may still be at %1% °C. Switch it off on the touchscreen if you are not "
+                                                        "printing now."),
+                                                     bed_temp_c) :
+                            wxString();
+}
+
 } // namespace
 
 Snapmaker2BedLevelDialog::Snapmaker2BedLevelDialog(wxWindow* parent, DynamicPrintConfig* config)
@@ -345,6 +355,7 @@ void Snapmaker2BedLevelDialog::on_levelling_finished(const Snapmaker2::Response&
         if (r.kind == proto::Reply::NetworkError && r.elapsed_s > 60)
             text += "\n" + _L("The connection was lost while the machine was levelling. Check the touchscreen: the levelling may still "
                               "be running or may have finished.");
+        text += bed_still_hot(m_params.bed_temp_c);
         show_error(this, text);
         return;
     }
@@ -375,7 +386,8 @@ void Snapmaker2BedLevelDialog::on_levelling_finished(const Snapmaker2::Response&
         break;
     case proto::LevelResult::Cancelled: text = _L("The controller cancelled the levelling. The mesh was not changed."); break;
     case proto::LevelResult::ProbeFailed:
-        text = _L("Probing failed. Check that the bed and the probe are clean and that nothing blocks the toolhead, then try again.");
+        text = _L("Probing failed. Check that the bed and the probe are clean and that nothing blocks the toolhead, then try again.") +
+               bed_still_hot(m_params.bed_temp_c);
         break;
     case proto::LevelResult::InvalidGrid: text = _L("The controller refused the grid size."); break;
     case proto::LevelResult::TooFast:
@@ -461,7 +473,8 @@ void Snapmaker2BedLevelDialog::on_close_request()
     if (m_stage == Stage::Levelling) {
         MessageDialog dlg(this,
                           _L("The machine keeps levelling: Snapmaker Orca cannot interrupt a running G-code command. "
-                             "To stop it, use the emergency stop button or switch the machine off.\n\nStop waiting and close this window?"),
+                             "To stop it, use the emergency stop button or switch the machine off.") +
+                              bed_still_hot(m_params.bed_temp_c) + "\n\n" + _L("Stop waiting and close this window?"),
                           _L("Snapmaker 2.0 bed levelling"), wxICON_WARNING | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
             return;
@@ -469,7 +482,8 @@ void Snapmaker2BedLevelDialog::on_close_request()
     } else if (m_stage == Stage::Zeroing) {
         MessageDialog dlg(this,
                           _L("The nozzle height has not been saved. The new mesh is used only until the machine restarts and the nozzle "
-                             "height may be wrong. Close without saving?"),
+                             "height may be wrong.") +
+                              bed_still_hot(m_params.bed_temp_c) + "\n\n" + _L("Close without saving?"),
                           _L("Snapmaker 2.0 bed levelling"), wxICON_WARNING | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
             return;
