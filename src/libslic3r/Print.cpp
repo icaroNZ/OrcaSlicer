@@ -3486,6 +3486,10 @@ void Print::_make_wipe_tower()
 
         // Size the categories to the filament count: presets saved before 2.4.1 carry a single
         // category, and get_at() falls back to it the same way WipeTower2::set_extruder() does.
+        if (m_config.filament_adhesiveness_category.values.size() < number_of_extruders)
+            BOOST_LOG_TRIVIAL(warning) << "wipe tower: padded filament_adhesiveness_category from "
+                                       << m_config.filament_adhesiveness_category.values.size() << " to " << number_of_extruders
+                                       << " entries (repeating the first)";
         std::vector<int> categories;
         for (size_t i = 0; i < number_of_extruders; ++i) {
             categories.push_back(m_config.filament_adhesiveness_category.get_at(i));

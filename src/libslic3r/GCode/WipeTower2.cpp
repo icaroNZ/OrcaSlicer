@@ -3397,7 +3397,7 @@ void WipeTower2::get_wall_skip_points(const WipeTowerInfo& layer, int layer_id)
         }
         process_depth = cur_block_depth[m_filpar[new_filament].category];
         if (new_filament != old_filament) {
-            if (m_filament_categories[new_filament] == m_filament_categories[old_filament]) {
+            if (get_filament_category(new_filament) == get_filament_category(old_filament)) {
                 process_depth += nozzle_change_depth;
             }
             else {
@@ -4119,8 +4119,11 @@ void WipeTower2::add_depth_to_block(int filament_id, int filament_adhesiveness_c
 
 int WipeTower2::get_filament_category(int filament_id)
 {
-    if (filament_id >= m_filament_categories.size())
+    // Fall back like ConfigOptionVector::get_at(): a short vector repeats its first entry (#1124).
+    if (m_filament_categories.empty() || filament_id < 0)
         return 0;
+    if (size_t(filament_id) >= m_filament_categories.size())
+        return m_filament_categories.front();
     return m_filament_categories[filament_id];
 }
 
@@ -4393,7 +4396,7 @@ int WipeTower2::get_wall_filament_for_all_layer()
     int filament_id = -1;
     int filament_count = 0;
     for (auto iter = filament_counts.begin(); iter != filament_counts.end(); ++iter) {
-        if (m_filament_categories[iter->first] == selected_category && iter->second > filament_count) {
+        if (get_filament_category(iter->first) == selected_category && iter->second > filament_count) {
             filament_id = iter->first;
             filament_count = iter->second;
         }
