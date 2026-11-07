@@ -322,6 +322,16 @@ std::vector<std::string> jog_z_gcodes(double step_mm)
     return { "G91", "G1 Z" + format_mm(step_mm) + " F" + std::to_string(JOG_FEEDRATE), "G90" };
 }
 
+bool jog_needs_confirmation(double total_mm, double step_mm, double threshold_mm)
+{
+    if (!std::isfinite(total_mm) || !std::isfinite(step_mm) || step_mm >= 0.)
+        return false;
+    // Compare in whole micrometres so 40 x -0.05 lands exactly on -2 and does not ask yet.
+    const long long total = std::llround(total_mm * 1000.), after = std::llround((total_mm + step_mm) * 1000.),
+                    limit = std::llround(threshold_mm * 1000.);
+    return total >= limit && after < limit;
+}
+
 std::string save_z_zero_gcode() { return "G1029 S0"; }
 
 namespace {

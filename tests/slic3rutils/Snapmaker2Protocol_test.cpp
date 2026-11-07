@@ -395,3 +395,25 @@ TEST_CASE("jog lines do not follow a comma-decimal LC_NUMERIC", "[Snapmaker2][le
     REQUIRE(down.size() == 3);
     CHECK(down[1] == "G1 Z-0.5 F300");
 }
+
+TEST_CASE("card-step jog asks once before going below -2 mm", "[Snapmaker2][level][jog]")
+{
+    CHECK(JOG_CONFIRM_BELOW_MM == Approx(-2.0));
+    CHECK_FALSE(jog_needs_confirmation(0., -0.5));
+    CHECK_FALSE(jog_needs_confirmation(-1.5, -0.5));  // lands exactly on -2: no prompt yet
+    CHECK(jog_needs_confirmation(-2.0, -0.05));       // first step below
+    CHECK(jog_needs_confirmation(-1.9, -0.5));        // crosses in one click
+    CHECK_FALSE(jog_needs_confirmation(-2.5, -0.1));  // already below, confirmed earlier
+    CHECK_FALSE(jog_needs_confirmation(-2.5, 0.5));   // raising never asks
+    CHECK_FALSE(jog_needs_confirmation(-1.9, -0.5, -3.0));
+    CHECK_FALSE(jog_needs_confirmation(std::nan(""), -0.5));
+    // 40 clicks of -0.05 accumulate floating-point error but must land on -2 without a prompt.
+    double total = 0.;
+    int    prompts = 0;
+    for (int i = 0; i < 40; ++i) {
+        prompts += jog_needs_confirmation(total, -0.05) ? 1 : 0;
+        total += -0.05;
+    }
+    CHECK(prompts == 0);
+    CHECK(jog_needs_confirmation(total, -0.05));
+}

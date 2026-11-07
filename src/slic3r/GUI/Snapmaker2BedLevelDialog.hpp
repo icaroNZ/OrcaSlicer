@@ -62,6 +62,10 @@ private:
     Mode                        m_mode { Mode::Mesh };
     // Mesh mode, a250t.4 said "Z offset not calibrated": the G1029 S0 of this card step also stores the Z offset.
     bool                        m_card_calibrates { false };
+    // Card step: a G-code line is running on the GUI thread (jog or save); clicks meanwhile are ignored.
+    bool                        m_line_busy { false };
+    // Sum of the jogs since probing left the nozzle over the bed (reset when the card step starts).
+    double                      m_jog_total_mm { 0. };
     std::chrono::steady_clock::time_point m_started;
     std::chrono::steady_clock::time_point m_bed_reached;
     bool                        m_bed_reached_seen { false };
@@ -112,6 +116,8 @@ private:
     // Runs one line on the GUI thread (short commands only); reconnects once if the touchscreen dropped the session.
     // `body` (optional) receives the controller's output for the line.
     bool run_line(const std::string& line, wxString& error, std::string* body = nullptr);
+    // Disables the card-step controls while lines run and swallows the clicks queued meanwhile (REV-SM2-JOG).
+    class LineLock;
     void stop_worker();
     void finish(int return_code);
 };

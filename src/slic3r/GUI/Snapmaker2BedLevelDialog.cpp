@@ -240,6 +240,7 @@ void Snapmaker2BedLevelDialog::set_stage(Stage stage)
     if (stage == Stage::Setup)
         m_status->SetLabel(wxEmptyString);
     if (stage == Stage::Zeroing) {
+        m_jog_total_mm = 0.;
         m_zero_how->SetLabel(
             (m_mode == Mode::ZOffset || m_card_calibrates ?
                  _L("This step stores the Z offset: the distance between the probe and the nozzle. ") :
@@ -606,13 +607,57 @@ bool Snapmaker2BedLevelDialog::run_line(const std::string& line, wxString& error
     return true;
 }
 
+// RAII guard for the card step: the jog/save lines run synchronously on the GUI thread, so clicks made while the
+// touchscreen is slow queue up and used to run as extra moves afterwards. Disable the controls, and before enabling them
+// again let the queued events through while the busy flag is still set, so they are dropped instead of stacking moves.
+class Snapmaker2BedLevelDialog::LineLock
+{
+public:
+    explicit LineLock(Snapmaker2BedLevelDialog& dlg) : m_dlg(dlg)
+    {
+        m_dlg.m_line_busy = true;
+        m_dlg.m_zero_panel->Disable();
+        m_dlg.m_save_btn->Disable();
+    }
+    ~LineLock()
+    {
+        wxYieldIfNeeded();
+        m_dlg.m_zero_panel->Enable();
+        m_dlg.m_save_btn->Enable();
+        m_dlg.m_line_busy = false;
+    }
+    LineLock(const LineLock&)            = delete;
+    LineLock& operator=(const LineLock&) = delete;
+
+private:
+    Snapmaker2BedLevelDialog& m_dlg;
+};
+
 void Snapmaker2BedLevelDialog::on_jog(double step_mm)
 {
+    if (m_line_busy) {
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: jog " << proto::format_mm(step_mm) << " mm ignored, a line is still running";
+        return;
+    }
     const std::vector<std::string> lines = proto::jog_z_gcodes(step_mm);
     if (lines.empty())
         return;
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: nozzle-zero jog " << proto::format_mm(step_mm) << " mm";
+    if (config_int("confirm_deep_jog", 1) != 0 && proto::jog_needs_confirmation(m_jog_total_mm, step_mm)) {
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: jog to " << proto::format_mm(m_jog_total_mm + step_mm)
+                                   << " mm since probing needs confirmation";
+        MessageDialog dlg(this,
+                          GUI::format_wxstr(_L("The nozzle is about to go %1% mm below where probing left it. Normally the card "
+                                               "drags well before that. Check that the card is under the nozzle.\n\nMove down anyway?"),
+                                            mm3(-(m_jog_total_mm + step_mm))),
+                          _L("Snapmaker 2.0 bed levelling"), wxICON_WARNING | wxYES_NO);
+        if (dlg.ShowModal() != wxID_YES) {
+            BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: deep jog cancelled by the user";
+            return;
+        }
+    }
+    const auto started = std::chrono::steady_clock::now();
     wxBusyCursor busy;
+    LineLock     lock(*this);
     wxString     error;
     for (const std::string& line : lines) {
         if (!run_line(line, error)) {
@@ -626,16 +671,26 @@ void Snapmaker2BedLevelDialog::on_jog(double step_mm)
             return;
         }
     }
+    m_jog_total_mm += step_mm;
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: nozzle-zero jog " << proto::format_mm(step_mm) << " mm, total "
+                            << proto::format_mm(m_jog_total_mm) << " mm since probing, "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()
+                            << " ms";
 }
 
 void Snapmaker2BedLevelDialog::on_save()
 {
+    if (m_line_busy) {
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: Save ignored, a line is still running";
+        return;
+    }
     BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: saving the nozzle height (" << proto::save_z_zero_gcode() << "), "
                             << (m_mode == Mode::ZOffset ? "Z-offset calibration" : "after the mesh measurement");
     wxString    error;
     std::string body;
     {
         wxBusyCursor busy;
+        LineLock     lock(*this);
         if (!run_line(proto::save_z_zero_gcode(), error, &body)) {
             BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0: saving the nozzle height failed";
             show_error(this, error);
@@ -731,7 +786,10 @@ void Snapmaker2BedLevelDialog::on_close_request()
                           _L("Snapmaker 2.0 bed levelling"), wxICON_WARNING | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
             return;
-        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: dialog closed without saving the nozzle height";
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: dialog closed without saving the nozzle height ("
+                                   << (m_mode == Mode::ZOffset ? "Z-offset calibration" : "mesh") << ", card step stores Z offset: "
+                                   << (m_card_calibrates ? "yes" : "no") << ", jogged " << proto::format_mm(m_jog_total_mm)
+                                   << " mm since probing)";
     }
     finish(m_stage == Stage::Saved ? wxID_OK : wxID_CANCEL);
 }

@@ -118,6 +118,9 @@ constexpr int LEVEL_SOAK_MAX_MIN  = LEVEL_SOAK_MAX_S / 60;
 constexpr int LEVEL_MIN_PLAUSIBLE_S = 15;
 constexpr double JOG_MAX_STEP_MM  = 1.0;
 constexpr int JOG_FEEDRATE        = 300; // mm/min, as the touchscreen's own levelling screens
+// Card step: ask before the nozzle goes more than 2 mm below where probing left it (a mis-click or stacked clicks
+// would otherwise drive it into the bed). Opt out with app config [snapmaker2_bed_level] confirm_deep_jog = 0.
+constexpr double JOG_CONFIRM_BELOW_MM = -2.0;
 
 struct LevelParams
 {
@@ -156,6 +159,9 @@ std::string soak_abort_reason(const std::string& body);
 std::string format_mm(double mm);
 // {"G91", "G1 Z-0.05 F300", "G90"} for one jog click; empty when |step| is 0, above JOG_MAX_STEP_MM or not finite.
 std::vector<std::string> jog_z_gcodes(double step_mm);
+// True when this jog takes the cumulative card-step travel `total_mm` (sum of jogs since probing) from at or above
+// `threshold_mm` to below it, i.e. the first click that crosses the line asks for confirmation; later clicks below do not.
+bool jog_needs_confirmation(double total_mm, double step_mm, double threshold_mm = JOG_CONFIRM_BELOW_MM);
 // "G1029 S0": the nozzle rests on the calibration card, apply the offset and save the mesh.
 std::string save_z_zero_gcode();
 
