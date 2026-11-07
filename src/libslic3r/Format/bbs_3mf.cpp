@@ -2122,9 +2122,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (cut_object_info != m_cut_object_infos.end()) {
                 model_object->cut_id = cut_object_info->second.id;
                 int vol_cnt = int(model_object->volumes.size());
-                for (auto connector : cut_object_info->second.connectors) {
+                for (const auto &connector : cut_object_info->second.connectors) {
+                    // volume_id and type come from untrusted file content: range-check both before use.
                     if (connector.volume_id < 0 || connector.volume_id >= vol_cnt) {
                         add_error("Invalid connector is found");
+                        continue;
+                    }
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::Undef)) {
+                        add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
                     model_object->volumes[connector.volume_id]->cut_info = 
