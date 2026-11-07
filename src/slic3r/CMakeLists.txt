@@ -564,6 +564,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/wxExtensions.hpp
     GUI/SMPhysicalPrinterDialog.hpp
     GUI/SMPhysicalPrinterDialog.cpp
+    GUI/Snapmaker2BedLevelDialog.cpp
+    GUI/Snapmaker2BedLevelDialog.hpp
     GUI/SSWCP.cpp
     GUI/SSWCP.hpp
     GUI/DownloadManager.cpp

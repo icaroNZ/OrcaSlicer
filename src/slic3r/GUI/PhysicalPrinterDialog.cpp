@@ -39,6 +39,8 @@
 #include "MsgDialog.hpp"
 #include "OAuthDialog.hpp"
 #include "SimplyPrint.hpp"
+#include "Snapmaker2BedLevelDialog.hpp"
+#include "../Utils/Snapmaker2.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -247,6 +249,30 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
         return sizer;
     };
 
+    // Snapmaker 2.0 (HTTP): heat-soaked bed levelling with a selectable grid through the touchscreen API
+    // (features/bed-levelling-heat-soak.md, needs controller firmware SM2-5.2.1-a250t.3 or newer).
+    auto print_host_level = [this, create_sizer_with_btn](wxWindow* parent) {
+        auto sizer = create_sizer_with_btn(parent, &m_printhost_level_btn, "", _L("Bed levelling") + " " + dots);
+        m_printhost_level_btn->SetToolTip(_L("Level the bed of the Snapmaker 2.0 with a chosen grid size, optionally after heating "
+                                             "and soaking the bed, then set the nozzle height."));
+        m_printhost_level_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
+            BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: bed levelling dialog opened for " << m_config->opt_string("print_host");
+            Snapmaker2BedLevelDialog dlg(this, m_config);
+            dlg.ShowModal();
+            // Same as after Test: keep the token the touchscreen approved, so it does not ask again.
+            const nlohmann::json auth = dlg.auth_info();
+            if (auth.is_object() && auth.contains("printhost_apikey") && auth["printhost_apikey"].is_string()) {
+                const std::string api_key = auth["printhost_apikey"].get<std::string>();
+                if (!api_key.empty() && api_key != m_config->opt_string("printhost_apikey")) {
+                    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: storing the access token approved for bed levelling";
+                    m_config->opt_string("printhost_apikey") = api_key;
+                    this->m_optgroup->set_value("printhost_apikey", wxString::FromUTF8(api_key), false);
+                }
+            }
+        });
+        return sizer;
+    };
+
     auto print_host_printers = [this, create_sizer_with_btn](wxWindow* parent) {
         //add_scaled_button(parent, &m_printhost_port_browse_btn, "browse", _(L("Refresh Printers")), wxBU_LEFT | wxBU_EXACTFIT);
         auto sizer = create_sizer_with_btn(parent, &m_printhost_port_browse_btn, "monitor_signal_strong", _L("Refresh") + " " + dots);
@@ -263,6 +289,7 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
     host_line.append_widget(printhost_browse);
     host_line.append_widget(print_host_test);
     host_line.append_widget(print_host_logout);
+    host_line.append_widget(print_host_level);
     m_optgroup->append_line(host_line);
 
     option = m_optgroup->get_option("print_host_webui");
@@ -463,6 +490,13 @@ void PhysicalPrinterDialog::update_printhost_buttons()
         m_printhost_browse_btn->Show(host->has_auto_discovery());
         m_printhost_logout_btn->Show(host->is_logged_in());
         m_printhost_test_btn->SetLabel(host->is_cloud() ? _L("Login/Test") : _L("Test"));
+    }
+    if (m_printhost_level_btn) {
+        const bool sm2 = dynamic_cast<Snapmaker2*>(host.get()) != nullptr;
+        m_printhost_level_btn->Show(sm2);
+        m_printhost_level_btn->Enable(sm2 && !m_config->opt_string("print_host").empty());
+        if (m_printhost_level_btn->GetParent())
+            m_printhost_level_btn->GetParent()->Layout();
     }
 }
 
@@ -729,6 +763,7 @@ void PhysicalPrinterDialog::on_dpi_changed(const wxRect& suggested_rect)
     m_printhost_browse_btn->Rescale();
     m_printhost_test_btn->Rescale();
     m_printhost_logout_btn->Rescale();
+    m_printhost_level_btn->Rescale();
     if (m_printhost_cafile_browse_btn)
         m_printhost_cafile_browse_btn->Rescale();
 

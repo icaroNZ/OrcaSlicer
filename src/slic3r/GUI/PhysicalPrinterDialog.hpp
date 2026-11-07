@@ -32,6 +32,7 @@ class PhysicalPrinterDialog : public DPIDialog
     Button*     m_printhost_browse_btn              {nullptr};
     Button*     m_printhost_test_btn                {nullptr};
     Button*     m_printhost_logout_btn              {nullptr};
+    Button*     m_printhost_level_btn               {nullptr}; // Snapmaker 2.0 (HTTP) only: "Bed levelling..."
     Button*     m_printhost_cafile_browse_btn       {nullptr};
     Button*     m_printhost_client_cert_browse_btn  {nullptr};
     Button*     m_printhost_port_browse_btn         {nullptr};
