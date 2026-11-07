@@ -1,6 +1,8 @@
 #ifndef slic3r_Snapmaker2_hpp_
 #define slic3r_Snapmaker2_hpp_
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <wx/string.h>
 
@@ -27,7 +29,7 @@ class Snapmaker2 : public PrintHost
 {
 public:
     explicit Snapmaker2(DynamicPrintConfig* config);
-    ~Snapmaker2() override = default;
+    ~Snapmaker2() override;
 
     const char* get_name() const override;
 
@@ -40,17 +42,40 @@ public:
     PrintHostPostUploadActions get_post_upload_actions() const override { return PrintHostPostUploadAction::StartPrint; }
     std::string                get_host() const override { return m_host; }
 
-    // After a successful test(): {"printhost_apikey": "<token approved on the touchscreen>"}, otherwise {}.
+    // After a successful test() or begin_interactive(): {"printhost_apikey": "<token approved on the touchscreen>"},
+    // otherwise {}.
     nlohmann::json get_auth_info() override;
 
-private:
     struct Response
     {
         unsigned                  status { 0 };
         std::string               body;
         std::string               error;
         Snapmaker2Protocol::Reply kind { Snapmaker2Protocol::Reply::NetworkError };
+        double                    elapsed_s { 0. };
+        bool                      cancelled { false };
     };
+
+    // Interactive session for the bed levelling dialog (Snapmaker2BedLevelDialog).
+    // GUI thread: connect (waiting for the approval on the touchscreen behind a progress dialog) and start a
+    // background api/v1/status poll that keeps the session alive until end_interactive(). Calling it again
+    // reconnects (e.g. after the touchscreen dropped the session). Not while execute_code() runs on a worker.
+    bool        begin_interactive(wxString& msg, Snapmaker2Protocol::ConnectInfo& info);
+    // Stop the keep-alive and disconnect (best effort). Also done by the destructor.
+    void        end_interactive();
+    bool        interactive() const { return m_keep_alive != nullptr; }
+    // One G-code line through api/v1/execute_code. Blocks until the controller finished the line (the touchscreen
+    // replies only then) or `timeout_s` passed. Safe from a worker thread between begin_interactive() and
+    // end_interactive(). Setting `*cancel` stops waiting within ~1 s; the machine keeps running the line.
+    Response    execute_code(const std::string& line, long timeout_s, const std::atomic<bool>* cancel = nullptr) const;
+    // Latest api/v1/status body and HTTP status from the keep-alive poll (thread safe); {"", 0} before the first poll.
+    std::string last_status_body() const;
+    unsigned    last_status_http() const;
+    // User text for a failed request. `step` is the API call ("connect", "status", "execute_code", ...).
+    wxString    describe_failure(const char* step, const Response& response) const;
+
+private:
+    class KeepAlive;
 
     enum class ApprovalUi { ProgressDialog, Notification, None };
 
@@ -69,8 +94,9 @@ private:
     bool wait_for_approval(wxString& msg, ApprovalUi ui, int approval_timeout_s) const;
     void close_session() const;
 
-    wxString describe_failure(const char* step, const Response& response) const;
     std::string log_url(const std::string& path) const;
+
+    std::unique_ptr<KeepAlive> m_keep_alive;
 };
 
 } // namespace Slic3r
