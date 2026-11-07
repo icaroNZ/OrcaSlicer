@@ -35,6 +35,12 @@ public:
     const std::string& get_cafile() const { return m_cafile; }
 
 protected:
+    // REV-OCTO-ERR: why the last test() failed, so get_test_failed_msg() only adds the "1.1.0 required" note for a
+    // version problem and a port hint for 401/403.
+    enum class TestFailure { None, Transport, HttpAuth, Http, NotOctoPrint, Version, Parse };
+    mutable TestFailure m_last_test_failure { TestFailure::None };
+    void note_test_http_error(const std::string& body, const std::string& error, unsigned status) const;
+
 #ifdef WIN32
     virtual bool upload_inner_with_resolved_ip(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn, const boost::asio::ip::address& resolved_addr) const;
 #endif

@@ -201,6 +201,7 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version at %2% : %3%, HTTP %4%, body: `%5%`") % name % url % error % status % body;
             res = false;
             msg = format_error(body, error, status);
+            note_test_http_error(body, error, status);
         })
         .on_complete([&, this](std::string body, unsigned) {
             BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Got version: %2%") % name % body;
@@ -211,6 +212,9 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
                 pt::read_json(ss, ptree);
 
                 if (!ptree.get_optional<std::string>("api")) {
+                    BOOST_LOG_TRIVIAL(error) << name << ": /api/version answered without an \"api\" field, not an OctoPrint server";
+                    m_last_test_failure = TestFailure::NotOctoPrint;
+                    msg = _L("The server answered, but not like OctoPrint (no \"api\" in /api/version). Check the address and port.");
                     res = false;
                     return;
                 }
@@ -218,11 +222,13 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
                 const auto text = ptree.get_optional<std::string>("text");
                 res = validate_version_text(text);
                 if (!res) {
+                    m_last_test_failure = TestFailure::Version;
                     msg = GUI::format_wxstr(_L("Mismatched type of print host: %s"), (text ? *text : name));
                 }
             }
             catch (const std::exception&) {
                 res = false;
+                m_last_test_failure = TestFailure::Parse;
                 msg = "Could not parse server response.";
             }
         })
@@ -238,6 +244,7 @@ bool OctoPrint::test(wxString& msg) const
     // Since the request is performed synchronously here,
     // it is ok to refer to `msg` from within the closure
     const char *name = get_name();
+    m_last_test_failure = TestFailure::None;
 
     bool res = true;
     auto url = make_url("api/version");
@@ -250,9 +257,10 @@ bool OctoPrint::test(wxString& msg) const
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
             res = false;
             msg = format_error(body, error, status);
+            note_test_http_error(body, error, status);
         })
         .on_complete([&, this](std::string body, unsigned) {
-            BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: Got version: %2%") % name % body;
+            BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Got version: %2%") % name % body.substr(0, 300);
 
             try {
                 std::stringstream ss(body);
@@ -260,6 +268,9 @@ bool OctoPrint::test(wxString& msg) const
                 pt::read_json(ss, ptree);
 
                 if (! ptree.get_optional<std::string>("api")) {
+                    BOOST_LOG_TRIVIAL(error) << name << ": /api/version answered without an \"api\" field, not an OctoPrint server";
+                    m_last_test_failure = TestFailure::NotOctoPrint;
+                    msg = _L("The server answered, but not like OctoPrint (no \"api\" in /api/version). Check the address and port.");
                     res = false;
                     return;
                 }
@@ -267,11 +278,13 @@ bool OctoPrint::test(wxString& msg) const
                 const auto text = ptree.get_optional<std::string>("text");
                 res = validate_version_text(text);
                 if (! res) {
+                    m_last_test_failure = TestFailure::Version;
                     msg = GUI::format_wxstr(_L("Mismatched type of print host: %s"), (text ? *text : name));
                 }
             }
             catch (const std::exception &) {
                 res = false;
+                m_last_test_failure = TestFailure::Parse;
                 msg = "Could not parse server response";
             }
         })
@@ -293,12 +306,33 @@ wxString OctoPrint::get_test_ok_msg () const
     return _(L("Connection to OctoPrint is working correctly."));
 }
 
+void OctoPrint::note_test_http_error(const std::string& body, const std::string& error, unsigned status) const
+{
+    m_last_test_failure = status == 401 || status == 403 ? TestFailure::HttpAuth : status != 0 ? TestFailure::Http : TestFailure::Transport;
+    if (m_last_test_failure == TestFailure::HttpAuth && body.empty())
+        BOOST_LOG_TRIVIAL(warning) << get_name() << ": HTTP " << status << " with an empty body from " << m_host
+                                   << ": another service may own this port (macOS AirPlay Receiver uses 5000); curl: " << error;
+}
+
 wxString OctoPrint::get_test_failed_msg (wxString &msg) const
 {
-    return GUI::format_wxstr("%s: %s\n\n%s"
-        , _L("Could not connect to OctoPrint")
-        , msg
-        , _L("Note: OctoPrint version 1.1.0 or higher is required."));
+    wxString hint;
+    switch (m_last_test_failure) {
+    case TestFailure::HttpAuth:
+        hint = _L("The server refused the request. Check the API key. If the reply above is empty, another service may be using "
+                  "this port (on macOS, AirPlay Receiver uses port 5000). A Snapmaker 2.0 touchscreen listens on port 8080: use the "
+                  "\"Snapmaker 2.0 (HTTP)\" host type for it.");
+        break;
+    case TestFailure::None:
+    case TestFailure::NotOctoPrint:
+    case TestFailure::Version: hint = _L("Note: OctoPrint version 1.1.0 or higher is required."); break;
+    case TestFailure::Transport:
+    case TestFailure::Http:
+    case TestFailure::Parse: break;
+    }
+    if (hint.empty())
+        return GUI::format_wxstr("%s: %s", _L("Could not connect to OctoPrint"), msg);
+    return GUI::format_wxstr("%s: %s\n\n%s", _L("Could not connect to OctoPrint"), msg, hint);
 }
 
 bool OctoPrint::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const
