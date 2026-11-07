@@ -57,6 +57,18 @@ wxString bed_still_hot(int bed_temp_c)
                             wxString();
 }
 
+wxString mm3(double mm) { return wxString::Format("%.3f", mm); }
+
+// Why a stored Z offset is not used, from "Z offset rejected: <reason>" (G1029 / G1029 A, firmware a250t.4).
+wxString rejected_reason(const std::string& rejected)
+{
+    if (rejected == "other toolhead")
+        return _L("it was calibrated with another 3D printing module");
+    if (rejected == "out of range")
+        return _L("it is outside the ±5 mm the firmware accepts");
+    return wxString::FromUTF8(rejected);
+}
+
 } // namespace
 
 Snapmaker2BedLevelDialog::Snapmaker2BedLevelDialog(wxWindow* parent, DynamicPrintConfig* config)
@@ -93,9 +105,12 @@ void Snapmaker2BedLevelDialog::build_ui()
     auto*      top   = new wxBoxSizer(wxVERTICAL);
 
     auto* intro = new wxStaticText(this, wxID_ANY,
-        _L("Probes a grid of points on the bed with the 3D printing module (single extruder), optionally after heating the bed "
-           "and letting it soak, then helps you set the nozzle height with the calibration card. "
-           "Needs controller firmware SM2-5.2.1-a250t.3 or newer."));
+        _L("Measure bed mesh probes a grid of points on the bed with the 3D printing module (single extruder), optionally "
+           "after heating the bed and letting it soak. Calibrate Z offset probes only the bed centre and sets the nozzle "
+           "height with the calibration card.\n"
+           "With controller firmware SM2-5.2.1-a250t.4 or newer the Z offset is stored once, and later mesh measurements "
+           "apply it and finish without the card step. Firmware SM2-5.2.1-a250t.3 measures the mesh and always asks for "
+           "the card step."));
     intro->Wrap(wrap);
     top->Add(intro, 0, wxEXPAND | wxALL, gap);
 
@@ -116,7 +131,15 @@ void Snapmaker2BedLevelDialog::build_ui()
     setup_sizer->Add(grid, 0, wxEXPAND);
     m_estimate = new wxStaticText(m_setup_panel, wxID_ANY, wxEmptyString);
     setup_sizer->Add(m_estimate, 0, wxEXPAND | wxTOP, gap);
+    auto* zoffset_row = new wxBoxSizer(wxHORIZONTAL);
+    m_zoffset_label   = new wxStaticText(m_setup_panel, wxID_ANY, _L("Stored Z offset: not read yet"));
+    m_query_btn       = new wxButton(m_setup_panel, wxID_ANY, _L("Read"), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+    m_query_btn->SetToolTip(_L("Read the Z offset stored on the machine (G1029)"));
+    zoffset_row->Add(m_zoffset_label, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    zoffset_row->Add(m_query_btn, 0, wxALIGN_CENTER_VERTICAL);
+    setup_sizer->Add(zoffset_row, 0, wxEXPAND | wxTOP, gap);
     m_setup_panel->SetSizer(setup_sizer);
+    m_query_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_query(); });
     top->Add(m_setup_panel, 0, wxEXPAND | wxLEFT | wxRIGHT, gap);
 
     for (wxSpinCtrl* ctrl : { m_grid, m_bed_temp, m_soak_min })
@@ -129,11 +152,11 @@ void Snapmaker2BedLevelDialog::build_ui()
     // --- nozzle zero ---
     m_zero_panel     = new wxPanel(this);
     auto* zero_sizer = new wxBoxSizer(wxVERTICAL);
-    auto* how        = new wxStaticText(m_zero_panel, wxID_ANY,
+    m_zero_how       = new wxStaticText(m_zero_panel, wxID_ANY,
         _L("Put the calibration card on the bed under the nozzle. Lower the nozzle step by step until the card drags slightly "
            "when you slide it, then press Save. Use the large steps first and finish with 0.05 mm."));
-    how->Wrap(wrap);
-    zero_sizer->Add(how, 0, wxEXPAND | wxBOTTOM, gap);
+    m_zero_how->Wrap(wrap);
+    zero_sizer->Add(m_zero_how, 0, wxEXPAND | wxBOTTOM, gap);
     auto* jog = new wxBoxSizer(wxHORIZONTAL);
     for (double step : { 0.5, 0.1, 0.05, -0.05, -0.1, -0.5 }) {
         auto* btn = new wxButton(m_zero_panel, wxID_ANY, "Z" + wxString(step > 0 ? "+" : "") + wxString::FromUTF8(proto::format_mm(step)),
@@ -151,15 +174,20 @@ void Snapmaker2BedLevelDialog::build_ui()
     // --- buttons ---
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     buttons->AddStretchSpacer();
-    m_start_btn = new wxButton(this, wxID_ANY, _L("Start levelling"));
+    m_start_btn = new wxButton(this, wxID_ANY, _L("Measure bed mesh"));
+    m_zcal_btn  = new wxButton(this, wxID_ANY, _L("Calibrate Z offset"));
     m_save_btn  = new wxButton(this, wxID_ANY, _L("Save"));
     m_close_btn = new wxButton(this, wxID_ANY, _L("Cancel"));
+    m_zcal_btn->SetToolTip(_L("Probe the bed centre and set the nozzle height with the card (needs firmware SM2-5.2.1-a250t.4). "
+                              "Run it once, and again after changing the nozzle or the module."));
     buttons->Add(m_start_btn, 0, wxRIGHT, FromDIP(6));
+    buttons->Add(m_zcal_btn, 0, wxRIGHT, FromDIP(6));
     buttons->Add(m_save_btn, 0, wxRIGHT, FromDIP(6));
     buttons->Add(m_close_btn, 0);
     top->Add(buttons, 0, wxEXPAND | wxALL, gap);
 
-    m_start_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_start(); });
+    m_start_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_start(Mode::Mesh); });
+    m_zcal_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_start(Mode::ZOffset); });
     m_save_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_save(); });
     m_close_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_close_request(); });
 
@@ -194,9 +222,6 @@ void Snapmaker2BedLevelDialog::update_estimate()
         text += "\n" + GUI::format_wxstr(_L("The bed heats to %1% °C first, soaks for %2% minutes and stays hot afterwards, "
                                             "so you can set the nozzle height at printing temperature."),
                                          m_bed_temp->GetValue(), m_soak_min->GetValue());
-    if (grid > 6)
-        text += "\n" + _L("Note: with more than 6 x 6 points the firmware compensates long moves on the back/right of the bed "
-                          "only at their end points.");
     m_estimate->SetLabel(text);
     m_estimate->Wrap(FromDIP(460));
     Layout();
@@ -209,21 +234,59 @@ void Snapmaker2BedLevelDialog::set_stage(Stage stage)
     m_setup_panel->Show(stage == Stage::Setup);
     m_zero_panel->Show(stage == Stage::Zeroing);
     m_start_btn->Show(stage == Stage::Setup);
+    m_zcal_btn->Show(stage == Stage::Setup);
     m_save_btn->Show(stage == Stage::Zeroing);
     m_close_btn->SetLabel(stage == Stage::Saved ? _L("Close") : _L("Cancel"));
     if (stage == Stage::Setup)
         m_status->SetLabel(wxEmptyString);
+    if (stage == Stage::Zeroing) {
+        m_zero_how->SetLabel(
+            (m_mode == Mode::ZOffset || m_card_calibrates ?
+                 _L("This step stores the Z offset: the distance between the probe and the nozzle. ") :
+                 wxString()) +
+            _L("Put the calibration card on the bed under the nozzle. Lower the nozzle step by step until the card drags slightly "
+               "when you slide it, then press Save. Use the large steps first and finish with 0.05 mm. Do not move X or Y."));
+        m_zero_how->Wrap(FromDIP(460));
+    }
     Layout();
     Fit();
 }
 
-void Snapmaker2BedLevelDialog::on_start()
+void Snapmaker2BedLevelDialog::set_status(const wxString& text)
+{
+    m_status->SetLabel(text);
+    m_status->Wrap(FromDIP(460));
+    Layout();
+    Fit();
+}
+
+void Snapmaker2BedLevelDialog::show_zoffset(const proto::ZOffsetReport& report)
+{
+    wxString text;
+    if (!report.found)
+        text = _L("Stored Z offset: unknown (needs controller firmware SM2-5.2.1-a250t.4 or newer)");
+    else if (report.valid)
+        text = GUI::format_wxstr(_L("Stored Z offset: %1% mm (valid)"), mm3(report.mm));
+    else if (!report.rejected.empty())
+        text = GUI::format_wxstr(_L("Stored Z offset: %1% mm, not used: %2%"), mm3(report.mm), rejected_reason(report.rejected));
+    else
+        text = _L("Stored Z offset: not set. Calibrate it once so that mesh measurements finish without the card step.");
+    m_zoffset_label->SetLabel(text);
+    m_zoffset_label->Wrap(FromDIP(400));
+    Layout();
+    Fit();
+}
+
+void Snapmaker2BedLevelDialog::on_start(Mode mode)
 {
     store_settings();
+    m_mode            = mode;
+    m_card_calibrates = false;
     m_params = proto::clamp_level_params(m_grid->GetValue(), m_bed_temp->GetValue(), m_soak_min->GetValue() * 60);
-    const std::string line = proto::level_gcode(m_params);
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: bed levelling requested: grid " << m_params.grid << ", bed " << m_params.bed_temp_c
-                            << " C, soak " << m_params.soak_s << " s -> '" << line << "'";
+    const std::string line = mode == Mode::Mesh ? proto::level_gcode(m_params) : proto::zoffset_calibration_gcode(m_params);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: " << (mode == Mode::Mesh ? "bed mesh measurement" : "Z-offset calibration")
+                            << " requested: grid " << m_params.grid << ", bed " << m_params.bed_temp_c << " C, soak " << m_params.soak_s
+                            << " s -> '" << line << "'";
 
     wxString           msg;
     proto::ConnectInfo info;
@@ -236,7 +299,7 @@ void Snapmaker2BedLevelDialog::on_start()
             return;
         }
     }
-    // G1029 A refuses everything but the single-extruder module (MODULE_TOOLHEAD_3DP), dual extruder included.
+    // G1029 A and G1029 Z refuse everything but the single-extruder module (MODULE_TOOLHEAD_3DP), dual extruder included.
     if (info.head_type != 1) {
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: bed levelling refused, mounted toolhead is headType " << info.head_type << " ("
                                    << proto::head_type_name(info.head_type) << ")";
@@ -257,8 +320,8 @@ void Snapmaker2BedLevelDialog::on_start()
     }
     m_started          = std::chrono::steady_clock::now();
     m_bed_reached_seen = false;
-    const long timeout = proto::level_timeout_s(m_params);
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: starting bed levelling, waiting up to " << timeout << " s for the controller";
+    const long timeout = mode == Mode::Mesh ? proto::level_timeout_s(m_params) : proto::zoffset_timeout_s(m_params);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: starting '" << line << "', waiting up to " << timeout << " s for the controller";
     Snapmaker2* host = m_host.get();
     m_worker = std::thread([this, host, line, timeout]() {
         Snapmaker2::Response r = host->execute_code(line, timeout, &m_cancel);
@@ -270,6 +333,36 @@ void Snapmaker2BedLevelDialog::on_start()
     set_stage(Stage::Levelling);
     m_status->SetLabel(_L("Starting..."));
     m_timer.Start(TIMER_MS);
+}
+
+void Snapmaker2BedLevelDialog::on_query()
+{
+    // Only from the setup stage, so no worker uses the session; connect just for this line and release it again,
+    // so that Luban or the touchscreen are not locked out while the dialog sits open.
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: reading the stored Z offset (" << proto::zoffset_query_gcode() << ")";
+    wxString           msg;
+    proto::ConnectInfo info;
+    std::string        body;
+    bool               ok = false;
+    {
+        wxBusyCursor busy;
+        if (!m_host->begin_interactive(msg, info)) {
+            show_error(this, m_host->get_test_failed_msg(msg));
+            return;
+        }
+        ok = run_line(proto::zoffset_query_gcode(), msg, &body);
+        m_host->end_interactive();
+    }
+    if (!ok) {
+        BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0: reading the Z offset failed";
+        show_error(this, msg);
+        return;
+    }
+    const proto::ZOffsetReport report = proto::parse_zoffset_report(body);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: Z offset report: " << (report.found ? "found" : "none (firmware older than a250t.4)")
+                            << ", " << report.mm << " mm, " << (report.valid ? "valid" : "not set")
+                            << (report.rejected.empty() ? "" : ", rejected: " + report.rejected);
+    show_zoffset(report);
 }
 
 void Snapmaker2BedLevelDialog::on_timer(wxTimerEvent&)
@@ -312,6 +405,8 @@ void Snapmaker2BedLevelDialog::on_timer(wxTimerEvent&)
                    std::chrono::duration_cast<std::chrono::seconds>(now - m_bed_reached).count() < m_params.soak_s) {
             const long left = m_params.soak_s - long(std::chrono::duration_cast<std::chrono::seconds>(now - m_bed_reached).count());
             text = GUI::format_wxstr(_L("Soaking the bed at %1% °C: about %2% left"), m_params.bed_temp_c, mm_ss(left));
+        } else if (m_mode == Mode::ZOffset) {
+            text = _L("Homing and probing the bed centre...");
         } else {
             text = GUI::format_wxstr(_L("Homing and probing %1% points..."), m_params.grid * m_params.grid);
         }
@@ -360,18 +455,66 @@ void Snapmaker2BedLevelDialog::on_levelling_finished(const Snapmaker2::Response&
         return;
     }
 
-    const proto::LevelResult result = proto::classify_level_reply(r.body, r.elapsed_s);
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: bed levelling result " << proto::level_result_name(result) << " after " << r.elapsed_s << " s";
-    if (result == proto::LevelResult::Done) {
-        set_stage(Stage::Zeroing);
-        m_status->SetLabel(GUI::format_wxstr(_L("Levelling finished: %1% x %1% points probed in %2%."), m_params.grid,
-                                             mm_ss(long(r.elapsed_s))));
-        return;
-    }
+    if (m_mode == Mode::ZOffset)
+        on_zoffset_probed(r);
+    else
+        on_mesh_finished(r);
+}
 
+void Snapmaker2BedLevelDialog::back_to_setup(const wxString& error)
+{
     m_timer.Stop();
     m_host->end_interactive();
     set_stage(Stage::Setup);
+    show_error(this, error);
+}
+
+void Snapmaker2BedLevelDialog::on_mesh_finished(const Snapmaker2::Response& r)
+{
+    const proto::LevelResult   result = proto::classify_level_reply(r.body, r.elapsed_s);
+    const proto::ZOffsetReport report = proto::parse_zoffset_report(r.body);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: bed levelling result " << proto::level_result_name(result) << " after " << r.elapsed_s
+                            << " s" << (report.found ? ", Z offset " + proto::format_mm(report.mm) + (report.valid ? " valid" : " not set") : "")
+                            << (report.rejected.empty() ? "" : ", rejected: " + report.rejected);
+    if (result == proto::LevelResult::Applied) {
+        // a250t.4 applied the stored Z offset and saved the mesh: no card step, nothing left to send.
+        m_timer.Stop();
+        m_host->end_interactive();
+        if (report.found)
+            show_zoffset(report);
+        set_stage(Stage::Saved);
+        wxString text = GUI::format_wxstr(_L("Mesh measured and saved: %1% x %1% points in %2%."), m_params.grid, mm_ss(long(r.elapsed_s)));
+        text += "\n" + (report.found ? GUI::format_wxstr(_L("The stored Z offset (%1% mm) was applied, so no card step is needed."),
+                                                         mm3(report.mm)) :
+                                       _L("The stored Z offset was applied, so no card step is needed."));
+        text += bed_still_hot(m_params.bed_temp_c);
+        set_status(text);
+        BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: mesh saved with the stored Z offset, card step skipped";
+        return;
+    }
+    if (result == proto::LevelResult::Done || result == proto::LevelResult::NotCalibrated) {
+        // NotCalibrated (a250t.4): the nozzle is already over the centre point and the G1029 S0 of this card step stores
+        // the Z offset as well, so the card step now *is* the Z-offset calibration (no separate G1029 Z needed).
+        m_card_calibrates = result == proto::LevelResult::NotCalibrated;
+        set_stage(Stage::Zeroing);
+        wxString text = GUI::format_wxstr(_L("Levelling finished: %1% x %1% points probed in %2%."), m_params.grid,
+                                          mm_ss(long(r.elapsed_s)));
+        if (m_card_calibrates) {
+            // G1029 A prints no value on this path, only the reason.
+            m_zoffset_label->SetLabel(report.rejected.empty() ?
+                                          _L("Stored Z offset: not set") :
+                                          GUI::format_wxstr(_L("Stored Z offset: not used: %1%"), rejected_reason(report.rejected)));
+            text += "\n" + (report.rejected.empty() ?
+                                _L("The Z offset is not calibrated yet.") :
+                                GUI::format_wxstr(_L("The stored Z offset was not used: %1%."), rejected_reason(report.rejected)));
+            text += " " + _L("Set the nozzle height with the card now: saving it also calibrates the Z offset, so later mesh "
+                             "measurements finish without this step.");
+        }
+        set_status(text);
+        BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: card step next" << (m_card_calibrates ? ", it also stores the Z offset" : " (legacy firmware)");
+        return;
+    }
+
     wxString text;
     switch (result) {
     case proto::LevelResult::NoSingleHead:
@@ -394,12 +537,53 @@ void Snapmaker2BedLevelDialog::on_levelling_finished(const Snapmaker2::Response&
         text = _L("The controller answered without probing. This needs controller firmware SM2-5.2.1-a250t.3 or newer; older firmware only "
                   "changes the grid size and resets the mesh in memory. Restart the machine to load the saved mesh again.");
         break;
-    case proto::LevelResult::Done: break;
+    case proto::LevelResult::Done:
+    case proto::LevelResult::Applied:
+    case proto::LevelResult::NotCalibrated: break;
     }
-    show_error(this, text);
+    back_to_setup(text);
 }
 
-bool Snapmaker2BedLevelDialog::run_line(const std::string& line, wxString& error)
+void Snapmaker2BedLevelDialog::on_zoffset_probed(const Snapmaker2::Response& r)
+{
+    const proto::ZOffsetCalResult result = proto::classify_zoffset_calibration_reply(r.body);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: Z-offset calibration result " << proto::zoffset_cal_result_name(result) << " after "
+                            << r.elapsed_s << " s";
+    if (result == proto::ZOffsetCalResult::Probed) {
+        set_stage(Stage::Zeroing);
+        set_status(GUI::format_wxstr(_L("Bed centre probed in %1%. The nozzle waits over it."), mm_ss(long(r.elapsed_s))));
+        return;
+    }
+
+    wxString text;
+    switch (result) {
+    case proto::ZOffsetCalResult::Unsupported:
+        // a250t.3 and stock firmware ignore "G1029 Z": never continue to G1029 S0 there, it would shift the saved mesh.
+        text = _L("The controller did not run the Z-offset calibration. It needs controller firmware SM2-5.2.1-a250t.4 or newer. "
+                  "Nothing was changed on the machine.");
+        break;
+    case proto::ZOffsetCalResult::NoSingleHead:
+        text = _L("The controller refused: the Z-offset calibration needs the single-extruder 3D printing module.");
+        break;
+    case proto::ZOffsetCalResult::BedFault:
+        text = _L("The controller refused to heat the bed because it reports a heated bed fault. Check the bed on the touchscreen.");
+        break;
+    case proto::ZOffsetCalResult::SoakAborted:
+        text = GUI::format_wxstr(_L("The heat soak was stopped (%1%). The bed was switched off and the Z offset was not changed."),
+                                 proto::soak_abort_reason(r.body));
+        break;
+    case proto::ZOffsetCalResult::Cancelled: text = _L("The controller cancelled the Z-offset calibration. Nothing was changed."); break;
+    case proto::ZOffsetCalResult::ProbeFailed:
+        text = _L("Probing the bed centre failed. Check that the bed and the probe are clean and that nothing blocks the toolhead, "
+                  "then try again. The live Z offset is 0 until the machine restarts.") +
+               bed_still_hot(m_params.bed_temp_c);
+        break;
+    case proto::ZOffsetCalResult::Probed: break;
+    }
+    back_to_setup(text);
+}
+
+bool Snapmaker2BedLevelDialog::run_line(const std::string& line, wxString& error, std::string* body)
 {
     Snapmaker2::Response r = m_host->execute_code(line, SHORT_LINE_TIMEOUT_S);
     if (r.kind == proto::Reply::NotAuthorised) {
@@ -417,6 +601,8 @@ bool Snapmaker2BedLevelDialog::run_line(const std::string& line, wxString& error
         error = m_host->describe_failure("execute_code", r);
         return false;
     }
+    if (body)
+        *body = r.body;
     return true;
 }
 
@@ -444,28 +630,85 @@ void Snapmaker2BedLevelDialog::on_jog(double step_mm)
 
 void Snapmaker2BedLevelDialog::on_save()
 {
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: saving the nozzle height (" << proto::save_z_zero_gcode() << ")";
-    wxString error;
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: saving the nozzle height (" << proto::save_z_zero_gcode() << "), "
+                            << (m_mode == Mode::ZOffset ? "Z-offset calibration" : "after the mesh measurement");
+    wxString    error;
+    std::string body;
     {
         wxBusyCursor busy;
-        if (!run_line(proto::save_z_zero_gcode(), error)) {
+        if (!run_line(proto::save_z_zero_gcode(), error, &body)) {
             BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0: saving the nozzle height failed";
             show_error(this, error);
             return;
         }
     }
+    const proto::SaveResult    result = proto::classify_save_reply(body);
+    const proto::ZOffsetReport report = proto::parse_zoffset_report(body);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: G1029 S0 result " << proto::save_result_name(result)
+                            << (report.found ? ", Z offset " + proto::format_mm(report.mm) + (report.valid ? " valid" : " not set") : "");
+    if (report.found)
+        show_zoffset(report);
+
+    // Refusals that saved nothing: the probe data is used up (or was never there), so start again from the setup.
+    const bool zoffset_refused = m_mode == Mode::ZOffset && result != proto::SaveResult::Stored;
+    if (result == proto::SaveResult::NothingProbed || zoffset_refused) {
+        wxString text;
+        switch (result) {
+        case proto::SaveResult::NothingProbed:
+            text = _L("The controller had nothing to save: the measurement was lost (machine restarted, or levelling exited on the "
+                      "touchscreen). Nothing was changed; run the measurement again.");
+            break;
+        case proto::SaveResult::OutOfRange:
+            text = _L("The measured Z offset is outside the ±5 mm the firmware accepts and was not stored. Check that the card was under "
+                      "the nozzle and try again.");
+            break;
+        case proto::SaveResult::NotAtCentre:
+            text = _L("The Z offset was not stored because the nozzle was not over the bed centre. Do not move X or Y during the card "
+                      "step; try again.");
+            break;
+        default: text = _L("The controller did not store the Z offset. Try the calibration again."); break;
+        }
+        if (m_mode == Mode::ZOffset)
+            text += "\n" + _L("The live Z offset is 0 until the machine restarts.");
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: nothing saved (" << proto::save_result_name(result) << ")";
+        back_to_setup(text + bed_still_hot(m_params.bed_temp_c));
+        return;
+    }
+
     m_timer.Stop();
     m_host->end_interactive();
     set_stage(Stage::Saved);
-    wxString text = _L("The mesh and the nozzle height were saved on the machine.");
+    wxString text;
+    if (m_mode == Mode::ZOffset) {
+        text = GUI::format_wxstr(_L("Z offset calibrated and saved on the machine: %1% mm. An existing mesh was re-zeroed at the bed centre; "
+                                    "mesh measurements now finish without the card step."),
+                                 mm3(report.mm));
+    } else {
+        text = _L("The mesh and the nozzle height were saved on the machine.");
+        switch (result) {
+        case proto::SaveResult::Stored:
+            text += "\n" + GUI::format_wxstr(_L("Z offset calibrated: %1% mm. Later mesh measurements finish without the card step."),
+                                             mm3(report.mm));
+            break;
+        case proto::SaveResult::OutOfRange:
+            text += "\n" + _L("The Z offset was outside ±5 mm and was not stored: the next mesh measurement asks for the card step again.");
+            break;
+        case proto::SaveResult::NotAtCentre:
+            text += "\n" + _L("The Z offset was not stored because the nozzle was not over the bed centre: the next mesh measurement asks "
+                              "for the card step again.");
+            break;
+        case proto::SaveResult::NotStored:
+            text += "\n" + _L("The Z offset was not stored: the next mesh measurement asks for the card step again.");
+            break;
+        case proto::SaveResult::Legacy:
+        case proto::SaveResult::NothingProbed: break;
+        }
+    }
     if (m_params.bed_temp_c > 0)
         text += "\n" + GUI::format_wxstr(_L("The bed is still at %1% °C. Switch it off on the touchscreen if you are not printing now."),
                                          m_params.bed_temp_c);
-    m_status->SetLabel(text);
-    m_status->Wrap(FromDIP(460));
-    Layout();
-    Fit();
-    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: bed levelling saved";
+    set_status(text);
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0: " << (m_mode == Mode::ZOffset ? "Z offset" : "bed levelling") << " saved";
 }
 
 void Snapmaker2BedLevelDialog::on_close_request()
@@ -480,10 +723,11 @@ void Snapmaker2BedLevelDialog::on_close_request()
             return;
         BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0: dialog closed while the machine was levelling";
     } else if (m_stage == Stage::Zeroing) {
-        MessageDialog dlg(this,
-                          _L("The nozzle height has not been saved. The new mesh is used only until the machine restarts and the nozzle "
-                             "height may be wrong.") +
-                              bed_still_hot(m_params.bed_temp_c) + "\n\n" + _L("Close without saving?"),
+        const wxString what = m_mode == Mode::ZOffset ?
+                                  _L("The Z offset has not been saved. The live Z offset is 0 until the machine restarts.") :
+                                  _L("The nozzle height has not been saved. The new mesh is used only until the machine restarts and the nozzle "
+                                     "height may be wrong.");
+        MessageDialog dlg(this, what + bed_still_hot(m_params.bed_temp_c) + "\n\n" + _L("Close without saving?"),
                           _L("Snapmaker 2.0 bed levelling"), wxICON_WARNING | wxYES_NO);
         if (dlg.ShowModal() != wxID_YES)
             return;
