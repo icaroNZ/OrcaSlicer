@@ -256,6 +256,11 @@ LevelResult classify_level_reply(const std::string& body, double elapsed_s)
         return LevelResult::ProbeFailed;
     if (contains_nocase(body, "Invalid grid size"))
         return LevelResult::InvalidGrid;
+    // a250t.4: only printed after a successful probe, so no plausibility check is needed (older firmware never prints them)
+    if (contains_nocase(body, "Z offset applied, mesh saved"))
+        return LevelResult::Applied;
+    if (contains_nocase(body, "Z offset not calibrated"))
+        return LevelResult::NotCalibrated;
     if (elapsed_s < LEVEL_MIN_PLAUSIBLE_S)
         return LevelResult::TooFast;
     return LevelResult::Done;
@@ -265,6 +270,8 @@ const char* level_result_name(LevelResult result)
 {
     switch (result) {
     case LevelResult::Done: return "done";
+    case LevelResult::Applied: return "z-offset-applied";
+    case LevelResult::NotCalibrated: return "z-offset-not-calibrated";
     case LevelResult::NoSingleHead: return "no-single-3dp-head";
     case LevelResult::BedFault: return "bed-fault";
     case LevelResult::SoakAborted: return "soak-aborted";
@@ -309,6 +316,158 @@ std::vector<std::string> jog_z_gcodes(double step_mm)
 }
 
 std::string save_z_zero_gcode() { return "G1029 S0"; }
+
+namespace {
+
+// "<number> (valid)" / "<number> (not set)" right after "Z offset " in `line`. Locale independent (no strtod).
+bool parse_report_tail(const std::string& line, size_t pos, double& mm, bool& valid)
+{
+    bool negative = false;
+    if (pos < line.size() && line[pos] == '-') {
+        negative = true;
+        ++pos;
+    }
+    double value = 0., scale = 0.;
+    bool   digits = false;
+    for (; pos < line.size(); ++pos) {
+        const char c = line[pos];
+        if (c >= '0' && c <= '9') {
+            digits = true;
+            if (scale == 0.)
+                value = value * 10. + (c - '0');
+            else {
+                value += (c - '0') * scale;
+                scale /= 10.;
+            }
+        } else if (c == '.' && scale == 0.) {
+            scale = 0.1;
+        } else
+            break;
+    }
+    if (!digits)
+        return false;
+    const std::string rest = trim(line.substr(pos));
+    if (rest == "(valid)")
+        valid = true;
+    else if (rest == "(not set)")
+        valid = false;
+    else
+        return false;
+    mm = negative ? -value : value;
+    return true;
+}
+
+} // namespace
+
+ZOffsetReport parse_zoffset_report(const std::string& body)
+{
+    static const std::string marker   = "Z offset ";
+    static const std::string rejected = "Z offset rejected: ";
+    ZOffsetReport            report;
+    size_t                   start = 0;
+    while (start < body.size()) {
+        size_t end = body.find_first_of("\r\n", start);
+        if (end == std::string::npos)
+            end = body.size();
+        const std::string line = body.substr(start, end - start);
+        start                  = end + 1;
+
+        const size_t pos = line.find(marker);
+        if (pos == std::string::npos)
+            continue;
+        if (line.compare(pos, rejected.size(), rejected) == 0) {
+            report.rejected = trim(line.substr(pos + rejected.size()));
+            continue;
+        }
+        if (line.find("Z offset not calibrated", pos) == pos) {
+            report.not_calibrated = true;
+            continue;
+        }
+        double mm    = 0.;
+        bool   valid = false;
+        if (parse_report_tail(line, pos + marker.size(), mm, valid)) {
+            report.found = true;
+            report.valid = valid;
+            report.mm    = mm;
+        }
+    }
+    return report;
+}
+
+std::string zoffset_query_gcode() { return "G1029"; }
+
+std::string zoffset_calibration_gcode(const LevelParams& params)
+{
+    std::string line = "G1029 Z";
+    if (params.bed_temp_c > 0)
+        line += " H" + std::to_string(params.bed_temp_c) + " K" + std::to_string(params.soak_s);
+    return line;
+}
+
+long zoffset_timeout_s(const LevelParams& params)
+{
+    // As level_timeout_s with a single probe point.
+    const long heat = params.bed_temp_c > 0 ? 30L * 60 + params.soak_s : 0;
+    return heat + 60L + 15L + 10L * 60;
+}
+
+ZOffsetCalResult classify_zoffset_calibration_reply(const std::string& body)
+{
+    if (contains_nocase(body, "cannot calibrate Z offset without 3DP"))
+        return ZOffsetCalResult::NoSingleHead;
+    if (contains_nocase(body, "heat soak refused"))
+        return ZOffsetCalResult::BedFault;
+    if (contains_nocase(body, "heat soak aborted"))
+        return ZOffsetCalResult::SoakAborted;
+    if (contains_nocase(body, "Z offset calibration cancelled"))
+        return ZOffsetCalResult::Cancelled;
+    if (contains_nocase(body, "auto probing fail") || contains_nocase(body, "Z offset calibration failed"))
+        return ZOffsetCalResult::ProbeFailed;
+    if (contains_nocase(body, "Z offset probed"))
+        return ZOffsetCalResult::Probed;
+    return ZOffsetCalResult::Unsupported;
+}
+
+const char* zoffset_cal_result_name(ZOffsetCalResult result)
+{
+    switch (result) {
+    case ZOffsetCalResult::Probed: return "probed";
+    case ZOffsetCalResult::NoSingleHead: return "no-single-3dp-head";
+    case ZOffsetCalResult::BedFault: return "bed-fault";
+    case ZOffsetCalResult::SoakAborted: return "soak-aborted";
+    case ZOffsetCalResult::Cancelled: return "cancelled";
+    case ZOffsetCalResult::ProbeFailed: return "probe-failed";
+    case ZOffsetCalResult::Unsupported: return "unsupported";
+    }
+    return "unknown";
+}
+
+SaveResult classify_save_reply(const std::string& body)
+{
+    if (contains_nocase(body, "G1029 S0 ignored: nothing probed"))
+        return SaveResult::NothingProbed;
+    if (contains_nocase(body, "Z offset not stored: nozzle is not over the centre point"))
+        return SaveResult::NotAtCentre;
+    if (contains_nocase(body, "Z offset out of range, not stored"))
+        return SaveResult::OutOfRange;
+    const ZOffsetReport report = parse_zoffset_report(body);
+    if (!report.found)
+        return SaveResult::Legacy;
+    return report.valid ? SaveResult::Stored : SaveResult::NotStored;
+}
+
+const char* save_result_name(SaveResult result)
+{
+    switch (result) {
+    case SaveResult::Stored: return "stored";
+    case SaveResult::OutOfRange: return "out-of-range";
+    case SaveResult::NotAtCentre: return "not-at-centre";
+    case SaveResult::NothingProbed: return "nothing-probed";
+    case SaveResult::NotStored: return "not-stored";
+    case SaveResult::Legacy: return "legacy";
+    }
+    return "unknown";
+}
 
 std::vector<std::pair<std::string, std::string>> execute_code_fields(const std::string& token, const std::string& code)
 {

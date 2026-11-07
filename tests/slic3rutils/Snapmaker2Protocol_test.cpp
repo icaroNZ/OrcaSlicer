@@ -1,6 +1,7 @@
 // Unit tests for the Snapmaker 2.0 touchscreen HTTP protocol helpers used by the "snapmaker2" print host.
 // The helpers have no wx / curl / boost dependency, so this suite builds with only Catch2 and nlohmann/json.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
@@ -10,6 +11,7 @@
 #include "slic3r/Utils/Snapmaker2Protocol.hpp"
 
 using namespace Slic3r::Snapmaker2Protocol;
+using Catch::Approx;
 
 TEST_CASE("make_url adds the default touchscreen port and scheme", "[Snapmaker2]")
 {
@@ -241,4 +243,124 @@ TEST_CASE("status snapshot for the levelling progress", "[Snapmaker2][level]")
 
     CHECK_FALSE(parse_status("").valid);
     CHECK_FALSE(parse_status("Machine is printing now, movement rejected.").valid);
+}
+
+// Output lines below are copied from Snapmaker2-Controller SM2-5.2.1-a250t.4 (G1029.cpp, abl.cpp, bed_level.cpp
+// ReportZOffset); SERIAL_ECHO_MSG / SERIAL_ECHO_START prefix "echo:".
+TEST_CASE("G1029 A replies with the stored Z offset (a250t.4)", "[Snapmaker2][zoffset]")
+{
+    const std::string applied = "echo:heat soak done\necho:Z offset applied, mesh saved\necho:Z offset 1.234 (valid)\nok";
+    CHECK(classify_level_reply(applied, 600.) == LevelResult::Applied);
+    const ZOffsetReport a = parse_zoffset_report(applied);
+    CHECK(a.found);
+    CHECK(a.valid);
+    CHECK(a.mm == Approx(1.234));
+    CHECK_FALSE(a.not_calibrated);
+    CHECK(a.rejected.empty());
+
+    const std::string not_cal = "echo:Z offset not calibrated\nok";
+    CHECK(classify_level_reply(not_cal, 300.) == LevelResult::NotCalibrated);
+    const ZOffsetReport n = parse_zoffset_report(not_cal);
+    CHECK_FALSE(n.found);
+    CHECK(n.not_calibrated);
+
+    const std::string other_head = "echo:Z offset rejected: other toolhead\r\necho:Z offset not calibrated\r\nok";
+    CHECK(classify_level_reply(other_head, 300.) == LevelResult::NotCalibrated);
+    CHECK(parse_zoffset_report(other_head).rejected == "other toolhead");
+    CHECK(parse_zoffset_report(other_head).not_calibrated);
+
+    // Failures still win over the Z-offset lines, and a250t.3 (no Z-offset line) is still the card-step "Done".
+    CHECK(classify_level_reply("auto probing fail !\nok", 200.) == LevelResult::ProbeFailed);
+    CHECK(classify_level_reply("echo:heat soak done\nok", 600.) == LevelResult::Done);
+    CHECK(std::string(level_result_name(LevelResult::Applied)) == "z-offset-applied");
+    CHECK(std::string(level_result_name(LevelResult::NotCalibrated)) == "z-offset-not-calibrated");
+}
+
+TEST_CASE("Z offset report line parsing", "[Snapmaker2][zoffset]")
+{
+    const ZOffsetReport v = parse_zoffset_report("echo:Z offset 1.234 (valid)\nok\n");
+    CHECK(v.found);
+    CHECK(v.valid);
+    CHECK(v.mm == Approx(1.234));
+
+    const ZOffsetReport z = parse_zoffset_report("echo:Z offset 0.000 (not set)");
+    CHECK(z.found);
+    CHECK_FALSE(z.valid);
+    CHECK(z.mm == 0.);
+
+    // SERIAL_ECHO_F(x, 3) prints negatives with a leading '-'.
+    const ZOffsetReport neg = parse_zoffset_report("echo:Z offset -0.100 (valid)\r\n");
+    CHECK(neg.found);
+    CHECK(neg.mm == Approx(-0.1));
+
+    const ZOffsetReport out = parse_zoffset_report("echo:Z offset rejected: out of range\necho:Z offset 7.250 (not set)\n");
+    CHECK(out.found);
+    CHECK_FALSE(out.valid);
+    CHECK(out.mm == Approx(7.25));
+    CHECK(out.rejected == "out of range");
+
+    // The other lines that start with "Z offset " are not reports.
+    for (const char* decoy : { "echo:Z offset probed, lower the nozzle onto the card and send G1029 S0",
+                               "echo:Z offset applied, mesh saved", "echo:Z offset not calibrated",
+                               "echo:Z offset rejected: other toolhead", "Z offset calibration failed",
+                               "Z offset calibration cancelled", "echo:Z offset out of range, not stored: 6.20",
+                               "echo:Z offset not stored: nozzle is not over the centre point",
+                               "echo:Z offset 1.234 (valid) extra", "echo:Z offset abc (valid)", "", "ok",
+                               "cannot calibrate Z offset without 3DP" })
+        CHECK_FALSE(parse_zoffset_report(decoy).found);
+
+    // The last report wins (S0 prints the new state after a refusal line).
+    const ZOffsetReport last = parse_zoffset_report("echo:Z offset 0.500 (valid)\necho:Z offset 0.000 (not set)\n");
+    CHECK_FALSE(last.valid);
+    CHECK(last.mm == 0.);
+
+    CHECK(zoffset_query_gcode() == "G1029");
+}
+
+TEST_CASE("Z-offset calibration command and replies", "[Snapmaker2][zoffset]")
+{
+    CHECK(zoffset_calibration_gcode(clamp_level_params(5, 60, 300)) == "G1029 Z H60 K300");
+    CHECK(zoffset_calibration_gcode(clamp_level_params(5, 0, 300)) == "G1029 Z");
+    CHECK(zoffset_calibration_gcode(clamp_level_params(11, 500, 99999)) == "G1029 Z H110 K3600");
+    CHECK(zoffset_calibration_gcode(clamp_level_params(3, 60, 0)).find('+') == std::string::npos);
+    CHECK(zoffset_timeout_s(clamp_level_params(3, 0, 0)) == 60 + 15 + 600);
+    CHECK(zoffset_timeout_s(clamp_level_params(3, 110, 3600)) == 1800 + 3600 + 60 + 15 + 600);
+    // One probe point: shorter than any mesh measurement.
+    CHECK(zoffset_timeout_s(clamp_level_params(3, 60, 300)) < level_timeout_s(clamp_level_params(3, 60, 300)));
+
+    CHECK(classify_zoffset_calibration_reply("echo:Z offset probed, lower the nozzle onto the card and send G1029 S0\nok") ==
+          ZOffsetCalResult::Probed);
+    CHECK(classify_zoffset_calibration_reply("echo:heat soak done\necho:Z offset probed, lower the nozzle onto the card and send G1029 S0\n") ==
+          ZOffsetCalResult::Probed);
+    CHECK(classify_zoffset_calibration_reply("cannot calibrate Z offset without 3DP\nok") == ZOffsetCalResult::NoSingleHead);
+    CHECK(classify_zoffset_calibration_reply("heat soak refused: bed fault\nZ offset calibration cancelled\n") ==
+          ZOffsetCalResult::BedFault);
+    const std::string aborted = "echo:soak 120s left\necho:heat soak aborted: screen exit\nZ offset calibration cancelled\nok";
+    CHECK(classify_zoffset_calibration_reply(aborted) == ZOffsetCalResult::SoakAborted);
+    CHECK(soak_abort_reason(aborted) == "screen exit");
+    CHECK(classify_zoffset_calibration_reply("Z offset calibration cancelled\n") == ZOffsetCalResult::Cancelled);
+    CHECK(classify_zoffset_calibration_reply("auto probing fail !\nZ offset calibration failed\nok") == ZOffsetCalResult::ProbeFailed);
+    CHECK(classify_zoffset_calibration_reply("Z offset calibration failed") == ZOffsetCalResult::ProbeFailed);
+    // a250t.3 / stock ignore "G1029 Z" and answer at once: never treat that as probed.
+    CHECK(classify_zoffset_calibration_reply("") == ZOffsetCalResult::Unsupported);
+    CHECK(classify_zoffset_calibration_reply("ok") == ZOffsetCalResult::Unsupported);
+    CHECK(classify_zoffset_calibration_reply("echo:heat soak done\nok") == ZOffsetCalResult::Unsupported);
+    CHECK(std::string(zoffset_cal_result_name(ZOffsetCalResult::Unsupported)) == "unsupported");
+    CHECK(std::string(zoffset_cal_result_name(ZOffsetCalResult::Probed)) == "probed");
+}
+
+TEST_CASE("G1029 S0 replies", "[Snapmaker2][zoffset]")
+{
+    CHECK(classify_save_reply("echo:Z offset 1.180 (valid)\nok") == SaveResult::Stored);
+    CHECK(classify_save_reply("echo:Z offset out of range, not stored: 6.20\necho:Z offset 0.000 (not set)\nok") ==
+          SaveResult::OutOfRange);
+    CHECK(classify_save_reply("echo:Z offset not stored: nozzle is not over the centre point\necho:Z offset 1.000 (valid)\n") ==
+          SaveResult::NotAtCentre);
+    CHECK(classify_save_reply("echo:G1029 S0 ignored: nothing probed\nok") == SaveResult::NothingProbed);
+    CHECK(classify_save_reply("echo:Z offset 0.000 (not set)\n") == SaveResult::NotStored);
+    // a250t.3 prints nothing for S0.
+    CHECK(classify_save_reply("") == SaveResult::Legacy);
+    CHECK(classify_save_reply("ok") == SaveResult::Legacy);
+    CHECK(std::string(save_result_name(SaveResult::NotAtCentre)) == "not-at-centre");
+    CHECK(std::string(save_result_name(SaveResult::Legacy)) == "legacy");
 }
