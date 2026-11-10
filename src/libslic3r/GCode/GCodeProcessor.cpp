@@ -4473,30 +4473,43 @@ void GCodeProcessor::run_post_process()
                 const float time = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
                 export_lines.append_line(";estimated_time(s): " + std::to_string(static_cast<size_t>(time + 0.5f)) + "\n");
                 export_lines.append_line(";layer_number: " + std::to_string(m_layer_id) + "\n");
+                // a250t F2: also collect every extrusion move (custom G-code included), so a job without object
+                // extrusion (PA Line calibration) still gets bounds instead of failing the export.
                 BoundingBoxf3 bounds;
-                auto merge_position = [&](const Vec3f& position, unsigned int extruder_id, double z_offset) {
+                BoundingBoxf3 all_extrusion_bounds;
+                auto merge_position = [&](const Vec3f& position, unsigned int extruder_id, double z_offset, bool is_object) {
                     const Vec3d machine_position = (position - m_extruder_offsets[extruder_id]).cast<double>() -
                                                   Vec3d(m_x_offset, m_y_offset, -z_offset);
-                    bounds.merge(machine_position);
+                    all_extrusion_bounds.merge(machine_position);
+                    if (is_object)
+                        bounds.merge(machine_position);
                 };
                 for (size_t i = 1; i < m_result.moves.size(); ++i) {
                     const auto& move = m_result.moves[i];
-                    if (move.type != EMoveType::Extrude || move.extrusion_role == erCustom)
+                    if (move.type != EMoveType::Extrude)
                         continue;
-                    merge_position(m_result.moves[i - 1].position, m_result.moves[i - 1].extruder_id, m_z_offset);
-                    merge_position(move.position, move.extruder_id, m_z_offset);
+                    const bool is_object = move.extrusion_role != erCustom;
+                    merge_position(m_result.moves[i - 1].position, m_result.moves[i - 1].extruder_id, m_z_offset, is_object);
+                    merge_position(move.position, move.extruder_id, m_z_offset, is_object);
                     // Arc interpolation vertices retain the original G-code Z offset.
                     for (const Vec3f& position : move.interpolation_points)
-                        merge_position(position, move.extruder_id, 0.0);
+                        merge_position(position, move.extruder_id, 0.0, is_object);
                 }
-                if (!bounds.defined) {
-                    BOOST_LOG_TRIVIAL(error) << "Snapmaker 2.0 header: no extrusion moves, cannot compute the print bounds";
-                    throw Slic3r::ExportError("Cannot determine Snapmaker print bounds.");
+                const SnapmakerHeader::BoundsSource sm2_bounds_source =
+                    SnapmakerHeader::bounds_source(bounds.defined, all_extrusion_bounds.defined);
+                if (sm2_bounds_source == SnapmakerHeader::BoundsSource::AllExtrusion) {
+                    BOOST_LOG_TRIVIAL(info) << "Snapmaker 2.0 header: no object extrusion (calibration or custom G-code only), "
+                                               "bounds taken from all extrusion moves";
+                    bounds = all_extrusion_bounds;
+                } else if (sm2_bounds_source == SnapmakerHeader::BoundsSource::None) {
+                    BOOST_LOG_TRIVIAL(warning) << "Snapmaker 2.0 header: no extrusion moves, bounds lines left out";
                 }
-                for (size_t axis = 0; axis < 3; ++axis) {
-                    const std::string suffix = std::string(1, "xyz"[axis]) + "(mm): ";
-                    export_lines.append_line(";min_" + suffix + float_to_string_decimal_point(bounds.min[axis], 3) + "\n");
-                    export_lines.append_line(";max_" + suffix + float_to_string_decimal_point(bounds.max[axis], 3) + "\n");
+                if (sm2_bounds_source != SnapmakerHeader::BoundsSource::None) {
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        const std::string suffix = std::string(1, "xyz"[axis]) + "(mm): ";
+                        export_lines.append_line(";min_" + suffix + float_to_string_decimal_point(bounds.min[axis], 3) + "\n");
+                        export_lines.append_line(";max_" + suffix + float_to_string_decimal_point(bounds.max[axis], 3) + "\n");
+                    }
                 }
                 has_snapmaker_header = true;
                 processed = true;

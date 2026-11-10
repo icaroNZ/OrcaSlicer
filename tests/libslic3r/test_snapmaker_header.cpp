@@ -55,3 +55,15 @@ TEST_CASE("Snapmaker header template starts with the patched line count", "[Snap
     CHECK(start.substr(prefix.size(), SnapmakerHeader::LINE_COUNT_WIDTH) == std::string(SnapmakerHeader::LINE_COUNT_WIDTH, '0'));
     CHECK(start.substr(prefix.size() + SnapmakerHeader::LINE_COUNT_WIDTH) == "\n;header_type: 3dp\n");
 }
+
+TEST_CASE("Snapmaker header bounds fall back when there is no object extrusion", "[SnapmakerHeader]")
+{
+    // a250t F2: the PA Line calibration has only custom G-code extrusion; it used to fail with
+    // "Cannot determine Snapmaker print bounds." instead of exporting.
+    using SnapmakerHeader::BoundsSource;
+    CHECK(SnapmakerHeader::bounds_source(true, true) == BoundsSource::Objects);
+    CHECK(SnapmakerHeader::bounds_source(false, true) == BoundsSource::AllExtrusion);
+    CHECK(SnapmakerHeader::bounds_source(false, false) == BoundsSource::None);
+    // Object extrusion is always part of all extrusion, but keep the object rule if a caller passes it alone.
+    CHECK(SnapmakerHeader::bounds_source(true, false) == BoundsSource::Objects);
+}

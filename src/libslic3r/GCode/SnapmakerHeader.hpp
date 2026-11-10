@@ -21,6 +21,19 @@ inline bool is_snapmaker_2(std::string_view printer_model)
     return false;
 }
 
+// a250t F2: which extrusion the ;min_/;max_ bounds lines report. Normal prints keep the object extrusion (custom G-code such
+// as the start purge is left out). Jobs made only of custom G-code (Orca's "Pressure advance - Line" calibration) fall back to
+// every extrusion move. With no extrusion at all the bounds lines are left out: the touchscreen only shows them as the
+// preview size (GcodeParser.java:417-446, PreviewFragment.java:351-354), it does not need them to accept or start a job.
+enum class BoundsSource { Objects, AllExtrusion, None };
+
+inline BoundsSource bounds_source(bool has_object_extrusion, bool has_any_extrusion)
+{
+    if (has_object_extrusion)
+        return BoundsSource::Objects;
+    return has_any_extrusion ? BoundsSource::AllExtrusion : BoundsSource::None;
+}
+
 inline bool update_line_count(std::FILE* file, std::size_t line_count)
 {
     // Keep the field width unchanged so the viewer's final line offsets remain valid.
